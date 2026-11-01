@@ -1,0 +1,18 @@
+{
+  "schema_version": "0.1",
+  "run_id": "demo-001",
+  "timestamp": "2026-11-01T12:00:00Z",
+  "window_ms": 1000,
+  "system": {
+    "mem_available_mb": 2048.0,
+    "disk_read_p95_ms": 15.0,
+    "disk_read_bytes_per_s": 10485760.0
+  },
+  "gpu": {"memory_used_mb": null},
+  "kv": {
+    "usage_ratio": 0.85,
+    "prefix_hit_ratio": 0.42,
+    "running_requests": 8
+  },
+  "sources": {"system": "mock", "gpu": "mock", "kv": "mock"}
+}
