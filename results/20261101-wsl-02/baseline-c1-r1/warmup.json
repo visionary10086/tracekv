@@ -1,0 +1,26 @@
+[
+  {
+    "request_id": 0,
+    "case_id": "kv_definition",
+    "started_at_utc": "2026-11-01T04:05:53.235922+00:00",
+    "success": true,
+    "ttft_ms": 19.825553000003993,
+    "completion_tokens": 64,
+    "prompt_tokens": 41,
+    "output_text": "在大模型推理中，使用KV（键值对）缓存可以显著提高性能和效率。通过将数据存储为键值对，并在需要时快速检索这些数据，可以减少内存访问的开销，从而提升计算速度和资源利用率。此外，KV缓存还可以帮助管理大量",
+    "finish_reason": "length",
+    "e2e_ms": 928.2773410000048
+  },
+  {
+    "request_id": 1,
+    "case_id": "linux_process",
+    "started_at_utc": "2026-11-01T04:05:54.164210+00:00",
+    "success": true,
+    "ttft_ms": 34.63969300000258,
+    "completion_tokens": 64,
+    "prompt_tokens": 41,
+    "output_text": "在Linux系统中，进程（Process）是程序的执行单元，它包含一个或多个线程（Thread）。进程是一个独立运行的单位，它可以被其他进程访问和控制。每个进程都有自己的地址空间、内存分配、文件系统权限等特性。\n\n线程（Thread）是进程中的",
+    "finish_reason": "length",
+    "e2e_ms": 939.2718340000031
+  }
+]

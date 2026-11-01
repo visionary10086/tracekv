@@ -1,0 +1,4 @@
+# Initial smoke-test environment; later KV connector work needs separate validation.
+vllm==0.11.2
+transformers==4.57.1
+numpy<2.4

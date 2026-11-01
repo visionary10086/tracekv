@@ -1,0 +1,6 @@
+{"id":"kv_definition","messages":[{"role":"user","content":"请用两句话解释大模型推理中的 KV Cache。"}]}
+{"id":"linux_process","messages":[{"role":"user","content":"请简要解释 Linux 中进程和线程的区别。"}]}
+{"id":"cache_lru","messages":[{"role":"user","content":"容量为2的LRU缓存依次访问A、B、A、C，最后留下哪些元素？请简述原因。"}]}
+{"id":"prefill_decode","messages":[{"role":"user","content":"请用两句话解释大模型推理的 prefill 和 decode 阶段。"}]}
+{"id":"io_wait","messages":[{"role":"user","content":"请简述为什么缓存数据从磁盘读回可能增加请求延迟。"}]}
+{"id":"baseline","messages":[{"role":"user","content":"比较两个缓存策略时，为什么需要固定模型、输入与资源预算？"}]}

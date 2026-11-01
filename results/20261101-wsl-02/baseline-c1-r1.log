@@ -1,0 +1,16 @@
+{
+  "requests": 30,
+  "successful_requests": 30,
+  "failed_requests": 0,
+  "failure_rate": 0.0,
+  "measurement_seconds": 28.859750226999992,
+  "successful_requests_per_second": 1.0395100360894058,
+  "successful_output_tokens": 1855,
+  "successful_output_tokens_per_second": 64.2763705648616,
+  "client_ttft_ms_p50": 18.33331550000139,
+  "client_ttft_ms_p95": 33.847069949999664,
+  "client_e2e_ms_p50": 988.5955629999969,
+  "client_e2e_ms_p95": 1111.5674464000006,
+  "small_sample_warning": true,
+  "metric_note": "Client TTFT is time to first nonempty visible-content chunk (includes network); E2E ends after stream validation. No per-token ITL is inferred from chunks. Output throughput uses successful requests only and includes failed-request time in the denominator."
+}

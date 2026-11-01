@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "kind": "environment_inventory",
+  "captured_at_utc": "2026-11-01T04:10:05.595207+00:00",
+  "platform": "Linux",
+  "release": "6.6.87.2-microsoft-standard-WSL2",
+  "architecture": "x86_64",
+  "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+  "python_executable": "/opt/tracekv/venv/bin/python",
+  "packages": {
+    "vllm": "0.11.2",
+    "torch": "2.9.0",
+    "triton": "3.5.0",
+    "nvidia-ml-py": "13.615.71"
+  },
+  "vllm_executable": null,
+  "btf_vmlinux_exists": true,
+  "checks": {
+    "gpu": {
+      "command": [
+        "nvidia-smi",
+        "--query-gpu=name,memory.total,driver_version",
+        "--format=csv,noheader"
+      ],
+      "returncode": 0,
+      "stdout": "NVIDIA GeForce RTX 5070 Laptop GPU, 8151 MiB, 592.01\n",
+      "stderr": ""
+    },
+    "os": {
+      "command": [
+        "cat",
+        "/etc/os-release"
+      ],
+      "returncode": 0,
+      "stdout": "PRETTY_NAME=\"Ubuntu 24.04.5 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nVERSION=\"24.04.5 LTS (Noble Numbat)\"\nVERSION_CODENAME=noble\nID=ubuntu\nID_LIKE=debian\nHOME_URL=\"https://www.ubuntu.com/\"\nSUPPORT_URL=\"https://help.ubuntu.com/\"\nBUG_REPORT_URL=\"https://bugs.launchpad.net/ubuntu/\"\nPRIVACY_POLICY_URL=\"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\"\nUBUNTU_CODENAME=noble\nLOGO=ubuntu-logo\n",
+      "stderr": ""
+    },
+    "kernel": {
+      "command": [
+        "uname",
+        "-r"
+      ],
+      "returncode": 0,
+      "stdout": "6.6.87.2-microsoft-standard-WSL2\n",
+      "stderr": ""
+    },
+    "memory": {
+      "command": [
+        "free",
+        "-h"
+      ],
+      "returncode": 0,
+      "stdout": "               total        used        free      shared  buff/cache   available\nMem:           7.6Gi       670Mi       6.7Gi       3.5Mi       420Mi       7.0Gi\nSwap:          2.0Gi          0B       2.0Gi\n",
+      "stderr": ""
+    },
+    "storage": {
+      "command": [
+        "lsblk",
+        "-d",
+        "-o",
+        "NAME,ROTA,SIZE,MODEL"
+      ],
+      "returncode": 0,
+      "stdout": "NAME ROTA   SIZE MODEL\nsda     1 388.4M Virtual Disk\nsdb     1   186M Virtual Disk\nsdc     1     2G Virtual Disk\nsdd     1     1T Virtual Disk\n",
+      "stderr": ""
+    },
+    "disk_space": {
+      "command": [
+        "df",
+        "-h",
+        "."
+      ],
+      "returncode": 0,
+      "stdout": "Filesystem      Size  Used Avail Use% Mounted on\nC:\\             401G  373G   28G  94% /mnt/c\n",
+      "stderr": ""
+    },
+    "bpftrace": {
+      "command": [
+        "bpftrace",
+        "--version"
+      ],
+      "returncode": null,
+      "error": "[Errno 2] No such file or directory: 'bpftrace'"
+    },
+    "block_tracepoints": {
+      "command": [
+        "bpftrace",
+        "-l",
+        "tracepoint:block:*"
+      ],
+      "returncode": null,
+      "error": "[Errno 2] No such file or directory: 'bpftrace'"
+    }
+  },
+  "note": "Inventory only; package presence and BTF existence do not prove compatibility or BPF permissions."
+}

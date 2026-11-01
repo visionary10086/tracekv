@@ -1,0 +1,50 @@
+{
+  "started_at_utc": "2026-11-01T04:05:23.272581+00:00",
+  "configuration": "small-model eager-mode functional baseline, no custom cache strategy",
+  "runs": [
+    {
+      "name": "smoke",
+      "returncode": 0
+    },
+    {
+      "name": "baseline-c1-r1",
+      "returncode": 0
+    },
+    {
+      "name": "baseline-c1-r2",
+      "returncode": 0
+    },
+    {
+      "name": "baseline-c1-r3",
+      "returncode": 0
+    },
+    {
+      "name": "baseline-c2-r1",
+      "returncode": 0
+    },
+    {
+      "name": "baseline-c2-r2",
+      "returncode": 0
+    },
+    {
+      "name": "baseline-c2-r3",
+      "returncode": 0
+    },
+    {
+      "name": "baseline-c4-r1",
+      "returncode": 0
+    },
+    {
+      "name": "baseline-c4-r2",
+      "returncode": 0
+    },
+    {
+      "name": "baseline-c4-r3",
+      "returncode": 0
+    }
+  ],
+  "server_ready": true,
+  "startup_seconds": 28.047284659,
+  "completed": true,
+  "finished_at_utc": "2026-11-01T04:08:42.242251+00:00"
+}

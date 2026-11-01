@@ -1,0 +1,20 @@
+{
+  "base_url": "http://127.0.0.1:8000",
+  "model": "tracekv-model",
+  "workload": "./workloads/smoke.jsonl",
+  "out": "results/20261101-wsl-02/baseline-c1-r2",
+  "requests": 30,
+  "concurrency": 1,
+  "warmup": 2,
+  "max_tokens": 64,
+  "timeout": 120.0,
+  "cache_state": "uncontrolled",
+  "cache_note": "Not reset or verified by this client",
+  "label": "baseline-c1-r2",
+  "schema_version": 1,
+  "run_id": "baseline-c1-r2",
+  "started_at_utc": "2026-11-01T04:06:24.158447+00:00",
+  "workload_sha256": "f366b123d20bf29145d5e04636c0ce65ca2071ce15feece36b0e7280381ca1a7",
+  "workload_mode": "deterministic cyclic text prompts, closed-loop concurrency",
+  "kind": "HTTP endpoint measurement; verify server identity separately"
+}
