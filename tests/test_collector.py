@@ -550,6 +550,31 @@ class TestSubprocessHandling(unittest.TestCase):
         finally:
             os.unlink(py_script)
 
+    def test_kernel_source_and_build_env_passed(self):
+        """Verify BPFTRACE_KERNEL_SOURCE and BPFTRACE_KERNEL_BUILD are passed to child env."""
+        code = (
+            "import os\n"
+            "assert os.environ.get('BPFTRACE_KERNEL_SOURCE') == '/custom/source'\n"
+            "assert os.environ.get('BPFTRACE_KERNEL_BUILD') == '/custom/build'\n"
+            "print('HEADER|switch_ns|wakeup_ns|tid|cpu|latency_ns|comm')\n"
+            "print('STAT|matched|0')\n"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+            f.write(code)
+            py_script = f.name
+        try:
+            from collector.cpu_scheduler import run_collector
+            result = run_collector(
+                run_id="kheaders-test",
+                bpftrace_bin=sys.executable,
+                script_path=Path(py_script),
+                kernel_source="/custom/source",
+                kernel_build="/custom/build",
+            )
+            self.assertEqual(result.bpftrace_exit_code, 0)
+        finally:
+            os.unlink(py_script)
+
 
 # ===========================================================================
 # CLI module execution test
@@ -561,6 +586,24 @@ class TestCLI(unittest.TestCase):
         import collector.cpu_scheduler as mod
         self.assertTrue(hasattr(mod, "main"))
         self.assertTrue(hasattr(mod, "run_collector"))
+
+    def test_cli_kernel_args(self):
+        """CLI arguments for kernel source and build are accepted."""
+        from unittest.mock import patch
+        from collector.cpu_scheduler import main, CollectorResult, TimeAnchor
+        dummy_result = CollectorResult(
+            run_id="test",
+            start_anchor=TimeAnchor(wall_ns=1, monotonic_ns=2),
+            end_anchor=TimeAnchor(wall_ns=3, monotonic_ns=4),
+        )
+        with patch("collector.cpu_scheduler.run_collector", return_value=dummy_result) as mock_run:
+            with patch("sys.stderr"), patch("builtins.print"):
+                exit_code = main(["--kernel-source", "/tmp/ksrc", "--kernel-build", "/tmp/kbld", "--duration", "2.0"])
+            self.assertEqual(exit_code, 0)
+            mock_run.assert_called_once()
+            _, kwargs = mock_run.call_args
+            self.assertEqual(str(kwargs["kernel_source"]), "/tmp/ksrc")
+            self.assertEqual(str(kwargs["kernel_build"]), "/tmp/kbld")
 
 
 if __name__ == "__main__":

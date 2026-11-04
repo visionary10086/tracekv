@@ -368,6 +368,8 @@ def run_collector(
     script_path: Path | None = None,
     max_map_keys: int = DEFAULT_MAX_MAP_KEYS,
     perf_rb_pages: int = DEFAULT_PERF_RB_PAGES,
+    kernel_source: Path | str | None = None,
+    kernel_build: Path | str | None = None,
 ) -> CollectorResult:
     """Launch bpftrace and collect scheduler latency events in real-time.
 
@@ -394,6 +396,10 @@ def run_collector(
         Value for BPFTRACE_MAX_MAP_KEYS environment variable.
     perf_rb_pages:
         Value for BPFTRACE_PERF_RB_PAGES environment variable.
+    kernel_source:
+        Override BPFTRACE_KERNEL_SOURCE directory.
+    kernel_build:
+        Override BPFTRACE_KERNEL_BUILD directory.
 
     Returns
     -------
@@ -416,6 +422,27 @@ def run_collector(
     env = os.environ.copy()
     env.setdefault("BPFTRACE_MAX_MAP_KEYS", str(max_map_keys))
     env.setdefault("BPFTRACE_PERF_RB_PAGES", str(perf_rb_pages))
+
+    if kernel_source is not None:
+        env["BPFTRACE_KERNEL_SOURCE"] = str(kernel_source)
+    if kernel_build is not None:
+        env["BPFTRACE_KERNEL_BUILD"] = str(kernel_build)
+
+    # Auto-detect kernel headers if kconfig.h is missing from default module build path
+    if "BPFTRACE_KERNEL_SOURCE" not in env or "BPFTRACE_KERNEL_BUILD" not in env:
+        release = os.uname().release
+        default_kconfig = Path(f"/lib/modules/{release}/build/include/linux/kconfig.h")
+        if not default_kconfig.exists():
+            candidates = [
+                Path.home() / f"kernel-headers-{release}",
+                Path(f"/home/dager/kernel-headers-{release}"),
+                Path(f"/tmp/kernel-headers-{release}"),
+            ]
+            for cand in candidates:
+                if (cand / "include" / "linux" / "kconfig.h").exists():
+                    env.setdefault("BPFTRACE_KERNEL_SOURCE", str(cand))
+                    env.setdefault("BPFTRACE_KERNEL_BUILD", str(cand))
+                    break
 
     anchor = TimeAnchor(wall_ns=time.time_ns(), monotonic_ns=time.monotonic_ns())
     result = CollectorResult(run_id=run_id, start_anchor=anchor)
@@ -569,6 +596,10 @@ def main(argv: list[str] | None = None) -> int:
                         help=f"Max reservoir samples for percentiles (default: {DEFAULT_MAX_SAMPLES})")
     parser.add_argument("--summary", type=Path, default=None,
                         help="Path for JSON summary output")
+    parser.add_argument("--kernel-source", type=Path, default=None,
+                        help="Override BPFTRACE_KERNEL_SOURCE directory")
+    parser.add_argument("--kernel-build", type=Path, default=None,
+                        help="Override BPFTRACE_KERNEL_BUILD directory")
     args = parser.parse_args(argv)
 
     print(f"Starting scheduler latency collector (run_id={args.run_id}, duration={args.duration}s)",
@@ -579,6 +610,8 @@ def main(argv: list[str] | None = None) -> int:
         output_path=args.out,
         duration_seconds=args.duration,
         max_samples=args.max_samples,
+        kernel_source=args.kernel_source,
+        kernel_build=args.kernel_build,
     )
 
     summary = stats_to_dict(result)
