@@ -572,8 +572,37 @@ class TestSubprocessHandling(unittest.TestCase):
                 kernel_build="/custom/build",
             )
             self.assertEqual(result.bpftrace_exit_code, 0)
+            self.assertEqual(result.kernel_source, "/custom/source")
+            self.assertEqual(result.kernel_build, "/custom/build")
         finally:
             os.unlink(py_script)
+
+    def test_find_kernel_headers(self):
+        """Verify find_kernel_headers locates directory with include/linux/kconfig.h."""
+        from collector.cpu_scheduler import find_kernel_headers
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            kconfig = base / "kernel-headers-6.18.54.1" / "include" / "linux" / "kconfig.h"
+            kconfig.parent.mkdir(parents=True, exist_ok=True)
+            kconfig.touch()
+
+            with patch("pathlib.Path.home", return_value=base):
+                detected = find_kernel_headers()
+                self.assertIsNotNone(detected)
+                self.assertEqual(detected, base / "kernel-headers-6.18.54.1")
+
+    def test_summary_includes_kernel_paths(self):
+        """Summary dict includes kernel_source and kernel_build entries."""
+        from collector.cpu_scheduler import CollectorResult, TimeAnchor, stats_to_dict
+        res = CollectorResult(
+            run_id="k-test",
+            start_anchor=TimeAnchor(wall_ns=1, monotonic_ns=2),
+            kernel_source="/path/to/source",
+            kernel_build="/path/to/build",
+        )
+        d = stats_to_dict(res)
+        self.assertEqual(d["kernel_source"], "/path/to/source")
+        self.assertEqual(d["kernel_build"], "/path/to/build")
 
 
 # ===========================================================================

@@ -94,6 +94,8 @@ class CollectorResult:
     stats: CollectorStats = field(default_factory=CollectorStats)
     bpftrace_exit_code: int | None = None
     error: str | None = None
+    kernel_source: str | None = None
+    kernel_build: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +243,8 @@ def stats_to_dict(result: CollectorResult) -> dict:
         "p50_ns": s.p50_ns,
         "p95_ns": s.p95_ns,
         "p99_ns": s.p99_ns,
+        "kernel_source": result.kernel_source,
+        "kernel_build": result.kernel_build,
         "bpftrace_exit_code": result.bpftrace_exit_code,
         "error": result.error,
     }
@@ -358,6 +362,44 @@ def _find_bpftrace() -> str | None:
     return which("bpftrace")
 
 
+def find_kernel_headers() -> Path | None:
+    """Locate kernel headers directory containing include/linux/kconfig.h.
+
+    Checks standard WSL extraction targets across full release string,
+    base version, and common search directories.
+    """
+    import glob
+    release = os.uname().release
+    base_version = release.split("-")[0]  # e.g. '6.18.54.1' from '6.18.54.1-microsoft-standard-WSL2'
+
+    search_roots = [
+        Path.home(),
+        Path("/home/dager"),
+        Path("/tmp"),
+    ]
+    suffixes = [
+        f"kernel-headers-{release}",
+        f"kernel-headers-{base_version}",
+        f"linux-headers-{release}",
+        f"linux-headers-{base_version}",
+    ]
+
+    for root in search_roots:
+        for suffix in suffixes:
+            cand = root / suffix
+            if (cand / "include" / "linux" / "kconfig.h").exists():
+                return cand
+
+    # Fallback: wildcard glob for any kernel-headers* directory with kconfig.h
+    for pat in ["/home/dager/kernel-headers*", "/tmp/kernel-headers*", str(Path.home() / "kernel-headers*")]:
+        for p in sorted(glob.glob(pat)):
+            cand = Path(p)
+            if (cand / "include" / "linux" / "kconfig.h").exists():
+                return cand
+
+    return None
+
+
 def run_collector(
     run_id: str,
     output_path: Path | None = None,
@@ -423,30 +465,37 @@ def run_collector(
     env.setdefault("BPFTRACE_MAX_MAP_KEYS", str(max_map_keys))
     env.setdefault("BPFTRACE_PERF_RB_PAGES", str(perf_rb_pages))
 
-    if kernel_source is not None:
-        env["BPFTRACE_KERNEL_SOURCE"] = str(kernel_source)
-    if kernel_build is not None:
-        env["BPFTRACE_KERNEL_BUILD"] = str(kernel_build)
+    # Resolve kernel headers
+    resolved_source = kernel_source or env.get("BPFTRACE_KERNEL_SOURCE")
+    resolved_build = kernel_build or env.get("BPFTRACE_KERNEL_BUILD")
 
-    # Auto-detect kernel headers if kconfig.h is missing from default module build path
-    if "BPFTRACE_KERNEL_SOURCE" not in env or "BPFTRACE_KERNEL_BUILD" not in env:
+    if resolved_source is None or resolved_build is None:
         release = os.uname().release
         default_kconfig = Path(f"/lib/modules/{release}/build/include/linux/kconfig.h")
         if not default_kconfig.exists():
-            candidates = [
-                Path.home() / f"kernel-headers-{release}",
-                Path(f"/home/dager/kernel-headers-{release}"),
-                Path(f"/tmp/kernel-headers-{release}"),
-            ]
-            for cand in candidates:
-                if (cand / "include" / "linux" / "kconfig.h").exists():
-                    env.setdefault("BPFTRACE_KERNEL_SOURCE", str(cand))
-                    env.setdefault("BPFTRACE_KERNEL_BUILD", str(cand))
-                    break
+            detected = find_kernel_headers()
+            if detected is not None:
+                resolved_source = resolved_source or str(detected)
+                resolved_build = resolved_build or str(detected)
+
+    if resolved_source is not None:
+        env["BPFTRACE_KERNEL_SOURCE"] = str(resolved_source)
+    if resolved_build is not None:
+        env["BPFTRACE_KERNEL_BUILD"] = str(resolved_build)
 
     anchor = TimeAnchor(wall_ns=time.time_ns(), monotonic_ns=time.monotonic_ns())
-    result = CollectorResult(run_id=run_id, start_anchor=anchor)
+    result = CollectorResult(
+        run_id=run_id,
+        start_anchor=anchor,
+        kernel_source=env.get("BPFTRACE_KERNEL_SOURCE"),
+        kernel_build=env.get("BPFTRACE_KERNEL_BUILD"),
+    )
     output_file: TextIO | None = None
+
+    if result.kernel_source:
+        print(f"[collector] Using kernel headers from {result.kernel_source}", file=sys.stderr, flush=True)
+    else:
+        print("[collector] Using system default kernel headers", file=sys.stderr, flush=True)
 
     try:
         proc = subprocess.Popen(
