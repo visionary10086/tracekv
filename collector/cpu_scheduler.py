@@ -280,7 +280,7 @@ def process_stream(
         line = raw_line.rstrip("\n").rstrip("\r")
         if not line:
             continue
-        if line.startswith(_HEADER_PREFIX):
+        if line.startswith(_HEADER_PREFIX) or line.startswith("Attaching "):
             continue
 
         if line.startswith(_STAT_PREFIX):
