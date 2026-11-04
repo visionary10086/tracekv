@@ -17,9 +17,11 @@ from __future__ import annotations
 import json
 import math
 import os
+import random
 import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,6 +37,11 @@ _SCRIPT_PATH = Path(__file__).resolve().parent / "ebpf" / "sched_latency.bt"
 _EVENT_PREFIX = "SCHED|"
 _STAT_PREFIX = "STAT|"
 _HEADER_PREFIX = "HEADER|"
+
+DEFAULT_MAX_MAP_KEYS = 65536
+DEFAULT_PERF_RB_PAGES = 256
+DEFAULT_COLLECTION_DURATION = 10.0
+DEFAULT_MAX_SAMPLES = 100_000
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +70,8 @@ class TimeAnchor:
 class CollectorStats:
     """Aggregate statistics for one collection run."""
     event_count: int = 0
+    kernel_matched_count: int | None = None
+    dropped_events_count: int = 0
     unmatched_switch_count: int = 0
     duplicate_wakeup_count: int = 0
     exit_cleanup_count: int = 0
@@ -220,6 +229,8 @@ def stats_to_dict(result: CollectorResult) -> dict:
         "start_wall_ns": result.start_anchor.wall_ns,
         "start_monotonic_ns": result.start_anchor.monotonic_ns,
         "event_count": s.event_count,
+        "kernel_matched_count": s.kernel_matched_count,
+        "dropped_events_count": s.dropped_events_count,
         "unmatched_switch_count": s.unmatched_switch_count,
         "duplicate_wakeup_count": s.duplicate_wakeup_count,
         "exit_cleanup_count": s.exit_cleanup_count,
@@ -247,8 +258,14 @@ def process_stream(
     stream: IO[str],
     run_id: str,
     output: TextIO | None = None,
+    max_samples: int = DEFAULT_MAX_SAMPLES,
+    random_seed: int | None = 42,
 ) -> CollectorResult:
     """Read lines from *stream*, parse events, optionally write JSONL to *output*.
+
+    Uses streaming accumulation for exact count/min/max/mean and reservoir
+    sampling for memory-bounded percentile computation (at most *max_samples*
+    stored in memory).
 
     Returns a :class:`CollectorResult` with computed statistics.  This
     function does **not** launch bpftrace — it only processes an already-open
@@ -256,7 +273,8 @@ def process_stream(
     """
     anchor = TimeAnchor(wall_ns=time.time_ns(), monotonic_ns=time.monotonic_ns())
     result = CollectorResult(run_id=run_id, start_anchor=anchor)
-    latencies: list[int] = []
+    sample_reservoir: list[int] = []
+    rng = random.Random(random_seed) if random_seed is not None else random.Random()
 
     for raw_line in stream:
         line = raw_line.rstrip("\n").rstrip("\r")
@@ -275,7 +293,8 @@ def process_stream(
                     result.stats.duplicate_wakeup_count = value
                 elif name == "exit_cleanup":
                     result.stats.exit_cleanup_count = value
-                # matched count is implicit from event_count
+                elif name == "matched":
+                    result.stats.kernel_matched_count = value
             continue
 
         if line.startswith(_EVENT_PREFIX):
@@ -283,7 +302,23 @@ def process_stream(
             if event is None:
                 result.stats.parser_error_count += 1
                 continue
-            latencies.append(event.latency_ns)
+
+            # Exact online streaming aggregations
+            result.stats.event_count += 1
+            result.stats.sum_ns += event.latency_ns
+            if result.stats.min_ns is None or event.latency_ns < result.stats.min_ns:
+                result.stats.min_ns = event.latency_ns
+            if result.stats.max_ns is None or event.latency_ns > result.stats.max_ns:
+                result.stats.max_ns = event.latency_ns
+
+            # Reservoir sampling: bounded memory for percentiles
+            if len(sample_reservoir) < max_samples:
+                sample_reservoir.append(event.latency_ns)
+            else:
+                j = rng.randint(0, result.stats.event_count - 1)
+                if j < max_samples:
+                    sample_reservoir[j] = event.latency_ns
+
             if output is not None:
                 output.write(event_to_jsonl(event, run_id) + "\n")
             continue
@@ -291,13 +326,21 @@ def process_stream(
         # Unknown line — could be bpftrace warning; count as parse error
         result.stats.parser_error_count += 1
 
-    computed = compute_stats(latencies)
-    # Preserve kernel-reported counters already stored
-    computed.unmatched_switch_count = result.stats.unmatched_switch_count
-    computed.duplicate_wakeup_count = result.stats.duplicate_wakeup_count
-    computed.exit_cleanup_count = result.stats.exit_cleanup_count
-    computed.parser_error_count = result.stats.parser_error_count
-    result.stats = computed
+    # Finalize summary statistics
+    if result.stats.event_count > 0:
+        result.stats.mean_ns = result.stats.sum_ns / result.stats.event_count
+        if sample_reservoir:
+            sample_reservoir.sort()
+            result.stats.p50_ns = percentile(sample_reservoir, 50)
+            result.stats.p95_ns = percentile(sample_reservoir, 95)
+            result.stats.p99_ns = percentile(sample_reservoir, 99)
+
+    # Reconcile kernel matched count vs user-space received events
+    if result.stats.kernel_matched_count is not None:
+        received_total = result.stats.event_count + result.stats.parser_error_count
+        result.stats.dropped_events_count = max(
+            0, result.stats.kernel_matched_count - received_total
+        )
 
     result.end_anchor = TimeAnchor(
         wall_ns=time.time_ns(), monotonic_ns=time.monotonic_ns(),
@@ -318,11 +361,15 @@ def _find_bpftrace() -> str | None:
 def run_collector(
     run_id: str,
     output_path: Path | None = None,
-    duration_seconds: float | None = None,
+    duration_seconds: float | None = DEFAULT_COLLECTION_DURATION,
+    stop_event: threading.Event | None = None,
+    max_samples: int = DEFAULT_MAX_SAMPLES,
     bpftrace_bin: str | None = None,
     script_path: Path | None = None,
+    max_map_keys: int = DEFAULT_MAX_MAP_KEYS,
+    perf_rb_pages: int = DEFAULT_PERF_RB_PAGES,
 ) -> CollectorResult:
-    """Launch bpftrace and collect scheduler latency events.
+    """Launch bpftrace and collect scheduler latency events in real-time.
 
     Parameters
     ----------
@@ -332,12 +379,21 @@ def run_collector(
         File path for the raw JSONL event log.  If ``None`` events are
         still parsed for statistics but not persisted.
     duration_seconds:
-        Optional wall-clock limit.  After this many seconds ``SIGINT`` is
-        sent to bpftrace so it flushes its ``END`` block.
+        Wall-clock duration in seconds.  Defaults to 10.0 seconds to prevent
+        unbounded execution.  If set to None, collection proceeds until
+        stop_event is set or the subprocess exits.
+    stop_event:
+        Optional threading.Event to signal collection stop cooperatively.
+    max_samples:
+        Maximum reservoir sample size for percentile computation.
     bpftrace_bin:
         Override the bpftrace executable path.
     script_path:
         Override the ``.bt`` script path.
+    max_map_keys:
+        Value for BPFTRACE_MAX_MAP_KEYS environment variable.
+    perf_rb_pages:
+        Value for BPFTRACE_PERF_RB_PAGES environment variable.
 
     Returns
     -------
@@ -357,6 +413,10 @@ def run_collector(
     script = str(script_path or _SCRIPT_PATH)
     cmd = [bt, script]
 
+    env = os.environ.copy()
+    env.setdefault("BPFTRACE_MAX_MAP_KEYS", str(max_map_keys))
+    env.setdefault("BPFTRACE_PERF_RB_PAGES", str(perf_rb_pages))
+
     anchor = TimeAnchor(wall_ns=time.time_ns(), monotonic_ns=time.monotonic_ns())
     result = CollectorResult(run_id=run_id, start_anchor=anchor)
     output_file: TextIO | None = None
@@ -368,6 +428,7 @@ def run_collector(
             stderr=subprocess.PIPE,
             text=True,
             start_new_session=True,
+            env=env,
         )
     except PermissionError as exc:
         result.end_anchor = TimeAnchor(
@@ -382,33 +443,84 @@ def run_collector(
         result.error = f"Failed to launch bpftrace: {exc}"
         return result
 
+    # Read stderr asynchronously in a daemon thread so it never fills its pipe buffer
+    stderr_chunks: list[str] = []
+    def _drain_stderr():
+        if proc.stderr is not None:
+            try:
+                for err_line in proc.stderr:
+                    stderr_chunks.append(err_line)
+            except Exception:
+                pass
+
+    stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+    stderr_thread.start()
+
+    def _send_sigint():
+        try:
+            os.killpg(proc.pid, signal.SIGINT)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    # Timer/Stopper thread to trigger SIGINT after duration_seconds or when stop_event is set
+    stop_thread: threading.Thread | None = None
+    if duration_seconds is not None or stop_event is not None:
+        def _stopper():
+            if duration_seconds is not None and stop_event is not None:
+                stop_event.wait(timeout=duration_seconds)
+            elif duration_seconds is not None:
+                time.sleep(duration_seconds)
+            elif stop_event is not None:
+                stop_event.wait()
+
+            _send_sigint()
+
+            # Escalation safety: if process has not terminated after 10s grace, SIGKILL
+            time.sleep(10.0)
+            if proc.poll() is None:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+
+        stop_thread = threading.Thread(target=_stopper, daemon=True)
+        stop_thread.start()
+
     try:
         if output_path is not None:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_file = open(output_path, "w", encoding="utf-8")
 
-        if duration_seconds is not None:
-            # Let bpftrace run for the specified duration then signal it
-            time.sleep(duration_seconds)
-            try:
-                os.killpg(proc.pid, signal.SIGINT)
-            except ProcessLookupError:
-                pass
-
+        # Stream stdout in REAL-TIME on the main thread (avoids pipe deadlock!)
         assert proc.stdout is not None
-        stream_result = process_stream(proc.stdout, run_id, output_file)
+        try:
+            stream_result = process_stream(
+                proc.stdout, run_id, output=output_file, max_samples=max_samples
+            )
+        except KeyboardInterrupt:
+            _send_sigint()
+            stream_result = process_stream(
+                proc.stdout, run_id, output=output_file, max_samples=max_samples
+            )
 
-        # Merge
+        # Merge results
         result.stats = stream_result.stats
         result.end_anchor = stream_result.end_anchor
 
-        proc.wait(timeout=10)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            proc.wait(timeout=5)
+
         result.bpftrace_exit_code = proc.returncode
 
-        stderr_text = ""
-        if proc.stderr:
-            stderr_text = proc.stderr.read().strip()
-            proc.stderr.close()
+        stderr_thread.join(timeout=2)
+        stderr_text = "".join(stderr_chunks).strip()
+
         if proc.returncode != 0 and stderr_text:
             result.error = f"bpftrace exited {proc.returncode}: {stderr_text}"
         elif proc.returncode != 0:
@@ -425,7 +537,6 @@ def run_collector(
     finally:
         if output_file is not None:
             output_file.close()
-        # Ensure subprocess pipes are closed to avoid ResourceWarning
         if proc.stdout and not proc.stdout.closed:
             proc.stdout.close()
         if proc.stderr and not proc.stderr.closed:
@@ -452,19 +563,22 @@ def main(argv: list[str] | None = None) -> int:
                         help="Experiment run identifier")
     parser.add_argument("--out", type=Path, default=None,
                         help="Path for JSONL event output")
-    parser.add_argument("--duration", type=float, default=None,
-                        help="Collection duration in seconds")
+    parser.add_argument("--duration", type=float, default=DEFAULT_COLLECTION_DURATION,
+                        help=f"Collection duration in seconds (default: {DEFAULT_COLLECTION_DURATION})")
+    parser.add_argument("--max-samples", type=int, default=DEFAULT_MAX_SAMPLES,
+                        help=f"Max reservoir samples for percentiles (default: {DEFAULT_MAX_SAMPLES})")
     parser.add_argument("--summary", type=Path, default=None,
                         help="Path for JSON summary output")
     args = parser.parse_args(argv)
 
-    print(f"Starting scheduler latency collector (run_id={args.run_id})",
+    print(f"Starting scheduler latency collector (run_id={args.run_id}, duration={args.duration}s)",
           file=sys.stderr, flush=True)
 
     result = run_collector(
         run_id=args.run_id,
         output_path=args.out,
         duration_seconds=args.duration,
+        max_samples=args.max_samples,
     )
 
     summary = stats_to_dict(result)

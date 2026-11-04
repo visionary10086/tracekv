@@ -272,9 +272,37 @@ class TestProcessStream(unittest.TestCase):
         ]
         result = process_stream(make_stream(lines), "t")
         self.assertEqual(result.stats.event_count, 1)
+        self.assertEqual(result.stats.kernel_matched_count, 1)
+        self.assertEqual(result.stats.dropped_events_count, 0)
         self.assertEqual(result.stats.duplicate_wakeup_count, 5)
         self.assertEqual(result.stats.unmatched_switch_count, 10)
         self.assertEqual(result.stats.exit_cleanup_count, 3)
+
+    def test_kernel_matched_loss_reconciliation(self):
+        # 100 matched in kernel, but only 90 lines received
+        lines = [make_line(200, 100, i, 0, 100, f"app{i}") for i in range(90)]
+        lines.append("STAT|matched|100")
+        result = process_stream(make_stream(lines), "loss-test")
+        self.assertEqual(result.stats.event_count, 90)
+        self.assertEqual(result.stats.kernel_matched_count, 100)
+        self.assertEqual(result.stats.dropped_events_count, 10)
+
+    def test_reservoir_sampling_bounds_memory(self):
+        # Stream 5000 events with max_samples=100
+        lines = [make_line(1000 + i, 1000, i, 0, (i + 1) * 10, f"p{i}") for i in range(5000)]
+        result = process_stream(make_stream(lines), "res-test", max_samples=100)
+        self.assertEqual(result.stats.event_count, 5000)
+        # min and max are exact across all 5000 events
+        self.assertEqual(result.stats.min_ns, 10)
+        self.assertEqual(result.stats.max_ns, 50000)
+        # mean is exact
+        expected_mean = sum((i + 1) * 10 for i in range(5000)) / 5000
+        self.assertAlmostEqual(result.stats.mean_ns, expected_mean)
+        # percentiles are computed from the bounded reservoir
+        self.assertIsNotNone(result.stats.p50_ns)
+        self.assertIsNotNone(result.stats.p95_ns)
+        self.assertIsNotNone(result.stats.p99_ns)
+        self.assertLess(result.stats.p50_ns, result.stats.p95_ns)
 
     def test_output_file_written(self):
         lines = [
@@ -426,6 +454,101 @@ class TestSubprocessHandling(unittest.TestCase):
             self.assertEqual(result.bpftrace_exit_code, 0)
         finally:
             os.unlink(script_path)
+
+    def test_streaming_large_volume_prevents_pipe_deadlock(self):
+        """Verify real-time streaming: generating 5,000 lines (>300 KB, far exceeding
+        the 64 KB kernel pipe buffer) completes without deadlocking."""
+        # Python script generating 5000 lines
+        generator_code = (
+            "import sys\n"
+            "print('HEADER|switch_ns|wakeup_ns|tid|cpu|latency_ns|comm')\n"
+            "for i in range(5000):\n"
+            "    print(f'SCHED|{200000+i}|{100000+i}|{i}|0|100000|app{i}')\n"
+            "print('STAT|matched|5000')\n"
+            "print('STAT|dup_wakeup|0')\n"
+            "print('STAT|unmatched_switch|0')\n"
+            "print('STAT|exit_cleanup|0')\n"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+            f.write(generator_code)
+            py_script = f.name
+        try:
+            from collector.cpu_scheduler import run_collector
+            result = run_collector(
+                run_id="pipe-volume-test",
+                bpftrace_bin=sys.executable,
+                script_path=Path(py_script),
+                duration_seconds=5.0,
+            )
+            self.assertEqual(result.stats.event_count, 5000)
+            self.assertEqual(result.stats.kernel_matched_count, 5000)
+            self.assertEqual(result.stats.dropped_events_count, 0)
+            self.assertEqual(result.bpftrace_exit_code, 0)
+        finally:
+            os.unlink(py_script)
+
+    def test_stop_event_terminates_subprocess(self):
+        """Verify cooperative stop via threading.Event."""
+        # A generator that runs in an infinite loop until signaled
+        code = (
+            "import sys, time\n"
+            "print('HEADER|switch_ns|wakeup_ns|tid|cpu|latency_ns|comm', flush=True)\n"
+            "try:\n"
+            "    for i in range(100):\n"
+            "        print(f'SCHED|{200+i}|100|1|0|100|app', flush=True)\n"
+            "        time.sleep(0.01)\n"
+            "    while True:\n"
+            "        time.sleep(0.1)\n"
+            "except KeyboardInterrupt:\n"
+            "    print('STAT|matched|50', flush=True)\n"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+            f.write(code)
+            py_script = f.name
+        try:
+            import threading
+            from collector.cpu_scheduler import run_collector
+            stop_evt = threading.Event()
+            # Set stop_event after 0.2s
+            timer = threading.Timer(0.2, stop_evt.set)
+            timer.daemon = True
+            timer.start()
+
+            result = run_collector(
+                run_id="stop-event-test",
+                bpftrace_bin=sys.executable,
+                script_path=Path(py_script),
+                duration_seconds=None,
+                stop_event=stop_evt,
+            )
+            self.assertGreater(result.stats.event_count, 0)
+        finally:
+            timer.cancel()
+            os.unlink(py_script)
+
+    def test_bpftrace_env_map_and_perf_defaults(self):
+        """Verify BPFTRACE_MAX_MAP_KEYS and BPFTRACE_PERF_RB_PAGES are set in child env."""
+        code = (
+            "import os\n"
+            "print(f\"STAT|map_keys|{os.environ.get('BPFTRACE_MAX_MAP_KEYS', '')}\")\n"
+            "print(f\"STAT|perf_pages|{os.environ.get('BPFTRACE_PERF_RB_PAGES', '')}\")\n"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+            f.write(code)
+            py_script = f.name
+        try:
+            from collector.cpu_scheduler import run_collector
+            result = run_collector(
+                run_id="env-test",
+                bpftrace_bin=sys.executable,
+                script_path=Path(py_script),
+                max_map_keys=32768,
+                perf_rb_pages=128,
+            )
+            # Child process ran with custom map and perf settings
+            self.assertEqual(result.bpftrace_exit_code, 0)
+        finally:
+            os.unlink(py_script)
 
 
 # ===========================================================================

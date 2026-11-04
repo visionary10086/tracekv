@@ -81,13 +81,38 @@
 | 56 | next_pid | pid_t | **切入任务 TID** |
 | 60 | next_prio | int | 切入任务优先级 |
 
-## 事件配对算法
+## 事件配对算法与测量边界
 
-1. `sched_wakeup` 触发时，使用 `args.pid`（目标任务 TID）作为 Map Key，记录 `nsecs`（内核单调时钟）。如果该 Key 已存在则不覆盖，递增 `dup_wakeup` 计数。
+1. `sched_wakeup` / `sched_wakeup_new` 触发时，使用 `args.pid`（目标任务 TID）作为 Map Key，记录 `nsecs`（内核单调时钟）。如果该 Key 已存在则不覆盖，递增 `dup_wakeup` 计数。
 
-2. `sched_switch` 触发时，使用 `args.next_pid`（即将上 CPU 的任务 TID）查找 Map。找到则计算 `nsecs - wakeup_ts` 得到延迟并输出，然后删除 Key。未找到则递增 `unmatched_switch`（追踪器启动前已在就绪队列中的任务，或 idle task）。
+2. `sched_switch` 触发时，使用 `args.next_pid`（即将上 CPU 的任务 TID）查找 Map。找到则计算 `nsecs - wakeup_ts` 得到延迟并输出，然后删除 Key。未找到则递增 `unmatched_switch`。
 
 3. `sched_process_exit` 触发时，如果退出任务有未消费的 wakeup 记录则清理，递增 `exit_cleanup`。
+
+### 测量边界说明
+
+- **度量范围（Sleep-to-Run）**：度量线程从睡眠态被唤醒（I/O 完成、互斥锁释放、网络数据到达等）进入就绪队列，到实际被调度器切换上 CPU 执行的排队等待时长。
+- **未覆盖范围（Preempt-to-Run）**：若正在执行的线程因时间片耗尽或被抢占而被放回就绪队列（内核状态始终为 `TASK_RUNNING`，`prev_state == 0`），不会触发 `sched_wakeup`。该线程再次被调度时会记入 `unmatched_switch`。当前指标严格限定为 Wakeup-to-Run Latency。
+
+## 流式消费与内存控制
+
+1. **实时流式消费（Real-time Streaming）**：
+   - 用户态采集器在主线程实时逐行消费子进程 stdout，后台线程异步排空 stderr。
+   - 彻底避免传统 `time.sleep()` 模式下 64 KB 内核管道缓冲区瞬间填满导致的子进程阻塞与死锁。
+   - 倒计时由独立的计时器线程驱动，到期后向子进程组发送 `SIGINT`，触发 bpftrace `END` 块并优雅退出。
+
+2. **蓄水池采样内存控制（Reservoir Sampling）**：
+   - `event_count`、`min_ns`、`max_ns`、`mean_ns`（`sum_ns / event_count`）通过在线流式算法精准计算，不消耗额外内存。
+   - 百分位数（P50/P95/P99）采用经典蓄水池采样算法（Reservoir Sampling，默认容量上限 `max_samples=100,000`）。
+   - 当事件总数 $N \le 100,000$ 时，所有样本 100% 保留，百分位数绝对精确；当 $N > 100,000$ 时，内存固定上限在约 3.5 MB，保证长周期基准测试不会发生内存泄漏或 OOM。
+
+3. **内核-用户态丢包比对（Loss Reconciliation）**：
+   - 采集器在退出时捕获 bpftrace 报告的 `STAT|matched|N`（内核实际匹配发送事件数）。
+   - 用户态比对实际接收并解析成功的事件总数，计算 `dropped_events_count = max(0, kernel_matched - received_total)`，准确量化传输丢失率。
+
+4. **bpftrace 运行环境配置**：
+   - 自动在子进程环境中配置 `BPFTRACE_MAX_MAP_KEYS=65536`（默认仅 4096，防止高并发哈希表溢出）。
+   - 自动在子进程环境中配置 `BPFTRACE_PERF_RB_PAGES=256`（提供充足的内核 Ring Buffer 吸收突发流量）。
 
 ## 输出格式
 
@@ -173,9 +198,8 @@ sudo python3 -m collector.cpu_scheduler \
     --duration 10
 ```
 
-## 已知限制
+## 已知限制与后续路线
 
-1. bpftrace 的 `printf` 通过 perf event buffer 传输到用户态，高事件频率下可能丢失事件。丢失事件由 bpftrace 运行时报告但无法在脚本内精确计数。
-2. `pid`（TGID）字段暂为 `null`。后续版本可在 `sched_wakeup` 中通过 `curtask->tgid` 获取，但需要额外验证。
-3. Map 容量受 bpftrace 默认限制（通常 4096 或更高），极端场景下新唤醒可能无法插入。
-4. 目标进程过滤（按 PID 或 comm）未在首版实现，采集全系统事件。后续版本增加过滤参数。
+1. **`pid`（TGID）字段**：暂保留为 `null`，避免在 bpftrace 简易脚本中猜测。后续版本如需获取完整 TGID，可通过 C 版本的 libbpf `bpf_get_current_pid_tgid()` 安全获取。
+2. **测量范围边界**：当前专注测量阻塞唤醒至就绪运行（Sleep-to-Run）耗时。计算密集型时间片抢占（Preempt-to-Run）暂计入 `unmatched_switch`，计划在第二迭代通过捕获 `prev_state == 0` 纳入统一调度队列延迟。
+3. **目标进程白名单**：首版为系统全量采样。高吞吐生产环境下可增加 PID 过滤以进一步降低开销。
