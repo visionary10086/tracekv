@@ -634,6 +634,49 @@ class TestCLI(unittest.TestCase):
             self.assertEqual(str(kwargs["kernel_source"]), "/tmp/ksrc")
             self.assertEqual(str(kwargs["kernel_build"]), "/tmp/kbld")
 
+    def test_workload_lifecycle(self):
+        """Synthetic workload runs and stops cleanly."""
+        from tools.sched_workload import run_workload
+        # Run a 0.05s workload with 1 worker and probe
+        start = time.time()
+        run_workload(workers=1, duration=0.05, include_probe=True, probe_interval=0.01)
+        elapsed = time.time() - start
+        self.assertGreaterEqual(elapsed, 0.04)
+
+    def test_experiment_table_formatting(self):
+        """Experiment table formats markdown comparison cleanly."""
+        from tools.sched_experiment import format_comparison_table
+        sample_summaries = [
+            {
+                "scenario": "idle",
+                "workers": 0,
+                "event_count": 1000,
+                "p50_ns": 5000,
+                "p95_ns": 15000,
+                "p99_ns": 35000,
+                "max_ns": 100000,
+                "dropped_events_count": 0,
+                "overhead": {"collector_avg_cpu_pct": 1.5, "peak_python_rss_kb": 25000},
+            },
+            {
+                "scenario": "load_32",
+                "workers": 32,
+                "event_count": 2500,
+                "p50_ns": 45000,
+                "p95_ns": 180000,
+                "p99_ns": 450000,
+                "max_ns": 2000000,
+                "dropped_events_count": 0,
+                "overhead": {"collector_avg_cpu_pct": 2.1, "peak_python_rss_kb": 26000},
+            },
+        ]
+        table = format_comparison_table(sample_summaries)
+        self.assertIn("Scenario", table)
+        self.assertIn("idle", table)
+        self.assertIn("load_32", table)
+        self.assertIn("5.00 µs", table)
+        self.assertIn("45.00 µs", table)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
