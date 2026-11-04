@@ -677,6 +677,102 @@ class TestCLI(unittest.TestCase):
         self.assertIn("5.00 µs", table)
         self.assertIn("45.00 µs", table)
 
+    def test_collect_gpu_metrics_mock(self):
+        """Verify GPU metrics parsing and MiB to decimal MB conversion."""
+        from collector.gpu import collect_gpu_metrics
+        mock_output = "1000, 12000, 45, 55, 120.5\n"
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=mock_output)
+            res = collect_gpu_metrics(binary_path="/mock/nvidia-smi")
+            self.assertEqual(res["source"], "nvidia-smi")
+            # 1000 MiB = 1000 * 1024 * 1024 / 1_000_000 = 1048.58 MB
+            self.assertAlmostEqual(res["memory_used_mb"], 1048.58, places=1)
+            self.assertEqual(res["utilization_pct"], 45.0)
+            self.assertEqual(res["temperature_c"], 55.0)
+            self.assertEqual(res["power_w"], 120.5)
+
+    def test_collect_gpu_metrics_unavailable(self):
+        """When nvidia-smi is unavailable, collector returns source=unavailable."""
+        from collector.gpu import collect_gpu_metrics
+        res = collect_gpu_metrics(binary_path="/nonexistent/nvidia-smi")
+        self.assertEqual(res["source"], "unavailable")
+        self.assertIsNone(res["memory_used_mb"])
+
+    def test_build_unified_snapshot_integration(self):
+        """Verify unified snapshot passes schema validation and includes extensions."""
+        from collector.aggregator import build_unified_snapshot
+        mock_sched = {
+            "p50_ns": 5000,
+            "p95_ns": 15000,
+            "p99_ns": 35000,
+            "mean_ns": 8000,
+            "unmatched_switch_count": 42,
+            "event_count": 500,
+            "dropped_events_count": 0,
+        }
+        mock_gpu = {"memory_used_mb": 2048.0, "source": "nvidia-smi"}
+        snap = build_unified_snapshot(
+            run_id="unified-test",
+            sched_summary=mock_sched,
+            gpu_metrics=mock_gpu,
+        )
+        self.assertEqual(snap["run_id"], "unified-test")
+        self.assertEqual(snap["sources"]["gpu"], "nvidia-smi")
+        self.assertIn("ebpf_sched", snap["sources"]["system"])
+        self.assertEqual(snap["system"]["sched_p50_us"], 5.0)
+        self.assertEqual(snap["system"]["sched_p95_us"], 15.0)
+        self.assertEqual(snap["system"]["sched_p99_us"], 35.0)
+        self.assertEqual(snap["system"]["sched_preempt_count"], 42)
+        self.assertIn("sched", snap)
+        self.assertEqual(snap["sched"]["event_count"], 500)
+
+    def test_correlator_time_buckets_and_pearson(self):
+        """Verify cross-layer time-series alignment and Pearson correlation."""
+        from collector.correlator import correlate_experiment_data, compute_correlation
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            summary_f = base / "summary.json"
+            events_f = base / "events.jsonl"
+            requests_f = base / "requests.jsonl"
+
+            # Create synthetic summary with time anchor (epoch 1000.0)
+            summary_f.write_text(json.dumps({
+                "start_wall_ns": 1_000_000_000_000,
+                "start_monotonic_ns": 500_000_000_000,
+            }))
+
+            # Event at mono = 500s (epoch 1000.0s), latency = 10us
+            # Event at mono = 501.5s (epoch 1001.5s), latency = 100us
+            events_lines = [
+                json.dumps({"timestamp_ns": 500_000_000_000, "value": 10000, "comm": "app"}),
+                json.dumps({"timestamp_ns": 501_500_000_000, "value": 100000, "comm": "app"}),
+            ]
+            events_f.write_text("\n".join(events_lines) + "\n")
+
+            # Requests at 1000.2s and 1001.7s
+            req_lines = [
+                json.dumps({"started_at_utc": "1970-01-01T00:16:40.200000Z", "ttft_ms": 15.0, "completion_tokens": 10}),
+                json.dumps({"started_at_utc": "1970-01-01T00:16:41.700000Z", "ttft_ms": 150.0, "completion_tokens": 20}),
+            ]
+            requests_f.write_text("\n".join(req_lines) + "\n")
+
+            buckets = correlate_experiment_data(
+                sched_events_path=events_f,
+                sched_summary_path=summary_f,
+                requests_path=requests_f,
+                bucket_sec=1.0,
+            )
+            self.assertGreaterEqual(len(buckets), 2)
+            # Bucket 0 has sched latency 10us and ttft 15ms
+            self.assertEqual(buckets[0]["sched"]["event_count"], 1)
+            self.assertEqual(buckets[0]["sched"]["p50_us"], 10.0)
+            self.assertEqual(buckets[0]["requests"]["request_count"], 1)
+            self.assertEqual(buckets[0]["requests"]["ttft_p50_ms"], 15.0)
+
+            # Test Pearson r
+            r = compute_correlation([10.0, 100.0], [15.0, 150.0])
+            self.assertEqual(r, 1.0)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
