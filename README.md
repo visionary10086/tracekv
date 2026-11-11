@@ -9,11 +9,25 @@
 - 并发 1、2、4 各三轮，每轮 30 次正式请求，共 270/270 成功。原始结果见 `results/20261101-wsl-02/`，解释和限制见 [阶段测试报告](docs/队长阶段测试报告_2026-11-01.md)。
 - 这些是短提示小模型基线，缓存状态未重置；没有验证 eBPF 开销、真实 KV 迁移或长上下文性能。
 
+## MVP v0.1 联调接口
+
+已提供统一快照、Linux `/proc` 可用内存采样、vLLM `/metrics` 的 KV 窗口指标适配、演示规则和 FastAPI 两个接口。协议与各成员交接字段见 [接口文档](docs/interfaces.md)；[模拟快照](contracts/sample_snapshot.json)只用于接口测试。
+
+```bash
+python -m pip install -r requirements-mvp.in
+python -m collector.demo
+python -m policy.demo < contracts/sample_snapshot.json
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8010
+```
+
+打开 `http://127.0.0.1:8010/docs` 测试 `GET /api/v1/snapshot` 和 `POST /api/v1/policy/evaluate`。若本地 vLLM 服务正在运行，启动 API 前设置 `TRACEKV_VLLM_METRICS_URL=http://127.0.0.1:8000/metrics`。未采到的指标明确为 `null`，不会冒充真实 KV 或 GPU 数据。
+
 ## 目录
 
 | 路径 | 内容 |
 | --- | --- |
 | `tools/` | 环境检查、vLLM 启动、流式基线客户端、WSL 测试批次 |
+| `app/`、`collector/`、`engine/`、`policy/`、`contracts/` | MVP 联调 API、采集、指标适配、规则与数据契约 |
 | `workloads/` | 固定短提示冒烟负载 |
 | `tests/` | 客户端与统计逻辑测试 |
 | `results/` | 成功批次的逐请求记录、指标、服务日志和 GPU 采样 |
