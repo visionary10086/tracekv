@@ -727,6 +727,49 @@ class TestCLI(unittest.TestCase):
             self.assertEqual(kwargs["target_pid"], 12345)
             self.assertEqual(kwargs["target_comm"], "vllm_engine")
 
+    def test_correlator_cli_diagnose(self):
+        """CLI arguments for correlator --diagnose and output generation."""
+        import tempfile
+        from collector.correlator import main
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            out_snap = base / "aligned_snapshots.jsonl"
+            out_diag = base / "bottleneck_diagnosis.json"
+
+            # Create mock inputs
+            sys_file = base / "system_samples.jsonl"
+            sys_file.write_text(json.dumps({
+                "timestamp": "2026-11-12T10:00:00Z",
+                "mem_available_mb": 8000.0,
+                "disk_read_bytes_per_s": 0.0,
+                "source": "proc",
+            }) + "\n")
+            gpu_file = base / "gpu_samples.jsonl"
+            gpu_file.write_text(json.dumps({
+                "timestamp": "2026-11-12T10:00:00Z",
+                "memory_used_mb": 4000.0,
+                "utilization_pct": 95.0,
+                "source": "nvml",
+            }) + "\n")
+
+            with patch("sys.argv", [
+                "correlator.py",
+                "--run-id", "test-diag-cli",
+                "--dir", str(base),
+                "--out", str(out_snap),
+                "--diagnose",
+                "--diagnosis-out", str(out_diag),
+            ]):
+                with patch("builtins.print"):
+                    main()
+
+            self.assertTrue(out_snap.exists())
+            self.assertTrue(out_diag.exists())
+            diag_data = json.loads(out_diag.read_text())
+            self.assertEqual(diag_data["run_id"], "test-diag-cli")
+            self.assertIn("primary_bottleneck", diag_data)
+
     def test_workload_lifecycle(self):
         """Synthetic workload runs and stops cleanly."""
         from tools.sched_workload import run_workload
@@ -1180,6 +1223,180 @@ class TestV02Integration(unittest.TestCase):
             )
             self.assertEqual(sample_cli["source"], "nvidia-smi")
             self.assertEqual(sample_cli["gpu_uuid"], "GPU-fallback")
+
+    def test_lagged_cross_correlation_causality(self):
+        """Verify lagged cross-correlation detects lead-lag temporal precedence."""
+        from collector.correlator import compute_lagged_correlation
+
+        # Case 1: X leads Y by exactly 1 time window
+        # When X spikes at index t, Y spikes at index t+1
+        x = [10.0, 10.0, 10.0, 100.0, 10.0, 10.0, 10.0, 100.0, 10.0, 10.0]
+        y = [5.0, 5.0, 5.0, 5.0, 95.0, 5.0, 5.0, 5.0, 95.0, 5.0]
+        res = compute_lagged_correlation(x, y, max_lag=2)
+        self.assertEqual(res["peak_lag"], 1)
+        self.assertEqual(res["causal_direction"], "x_leads_y")
+        self.assertGreater(res["peak_correlation"], 0.7)
+
+        # Case 2: Synchronous co-movement
+        z = [v * 2.0 for v in x]
+        res_sync = compute_lagged_correlation(x, z, max_lag=2)
+        self.assertEqual(res_sync["peak_lag"], 0)
+        self.assertEqual(res_sync["causal_direction"], "synchronous")
+        self.assertAlmostEqual(res_sync["peak_correlation"], 1.0, places=2)
+
+    def test_analyze_kv_pcie_transfers(self):
+        """Verify software KV transfers aligned with NVML PCIe physical metrics."""
+        from collector.correlator import analyze_kv_pcie_transfers
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            kv_file = base / "kv_transfers.jsonl"
+            gpu_file = base / "gpu_samples.jsonl"
+
+            # 2 transfers: 1 gpu_to_cpu, 1 cpu_to_gpu
+            kv_file.write_text(
+                json.dumps({
+                    "job_id": 1,
+                    "direction": "gpu_to_cpu",
+                    "gpu_blocks": 16,
+                    "submitted_ns": 1_000_000_000,
+                    "observed_ns": 1_050_000_000,
+                    "elapsed_ms": 50.0,
+                    "status": "completed",
+                }) + "\n" +
+                json.dumps({
+                    "job_id": 2,
+                    "direction": "cpu_to_gpu",
+                    "gpu_blocks": 32,
+                    "submitted_ns": 2_000_000_000,
+                    "observed_ns": 2_020_000_000,
+                    "elapsed_ms": 20.0,
+                    "status": "completed",
+                }) + "\n"
+            )
+
+            # High PCIe Rx throughput (25 GB/s = 25,000,000 KB/s) -> PCIe saturation
+            gpu_file.write_text(
+                json.dumps({
+                    "timestamp": "2026-11-12T10:00:01Z",
+                    "pcie_tx_kb_per_s": 1_000_000,
+                    "pcie_rx_kb_per_s": 25_000_000,
+                }) + "\n"
+            )
+
+            res = analyze_kv_pcie_transfers(
+                kv_transfers_path=kv_file,
+                gpu_samples_path=gpu_file,
+                pcie_theoretical_bandwidth_mb_per_s=31500.0,
+            )
+            self.assertTrue(res["available"])
+            self.assertEqual(res["total_transfers"], 2)
+            self.assertEqual(res["gpu_to_cpu_transfers"], 1)
+            self.assertEqual(res["cpu_to_gpu_transfers"], 1)
+            self.assertEqual(res["total_gpu_blocks"], 48)
+            # 25,000 MB/s on 31,500 MB/s link is ~79.37% saturation -> PCIE_BUS_SATURATION
+            self.assertEqual(res["bottleneck"], "PCIE_BUS_SATURATION")
+            self.assertGreater(res["pcie_physical"]["bus_saturation_pct"], 75.0)
+
+    def test_diagnose_system_bottlenecks(self):
+        """Verify automated bottleneck attribution across scheduling, PCIe and memory."""
+        from collector.correlator import diagnose_system_bottlenecks
+
+        # Case 1: CPU contention bottleneck
+        snaps_contention = [
+            {
+                "run_id": "r-contention",
+                "sched": {"p99_us": 12000.0, "scope": "target_process"},
+                "system": {"psi": {"psi_cpu_some_avg10": 35.0}},
+                "gpu": {"utilization_pct": 20.0},
+            }
+        ]
+        diag1 = diagnose_system_bottlenecks(snaps_contention)
+        self.assertEqual(diag1["primary_bottleneck"], "HOST_SCHEDULING_CONTENTION")
+        self.assertEqual(diag1["severity"], "CRITICAL")
+        self.assertTrue(len(diag1["recommendations"]) > 0)
+
+        # Case 2: Memory/IO pressure bottleneck
+        snaps_mem = [
+            {
+                "run_id": "r-mem",
+                "sched": {"p99_us": 500.0, "scope": "system"},
+                "system": {"psi": {"psi_mem_some_avg10": 28.0, "psi_io_some_avg10": 10.0}},
+                "gpu": {"utilization_pct": 50.0},
+            }
+        ]
+        diag2 = diagnose_system_bottlenecks(snaps_mem)
+        self.assertEqual(diag2["primary_bottleneck"], "SYSTEM_MEMORY_IO_PRESSURE")
+        self.assertEqual(diag2["severity"], "CRITICAL")
+
+        # Case 3: GPU compute bound
+        snaps_healthy = [
+            {
+                "run_id": "r-healthy",
+                "sched": {"p99_us": 300.0, "scope": "system"},
+                "system": {"psi": {"psi_cpu_some_avg10": 2.0}},
+                "gpu": {"utilization_pct": 94.0},
+            }
+        ]
+        diag3 = diagnose_system_bottlenecks(snaps_healthy)
+        self.assertEqual(diag3["primary_bottleneck"], "GPU_COMPUTE_BOUND")
+        self.assertEqual(diag3["severity"], "INFO")
+
+    def test_subsecond_aligned_snapshots_with_target(self):
+        """Verify 100ms sub-second windows with target process isolation in snapshot."""
+        from collector.correlator import generate_aligned_snapshots
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            summary_path = base / "sched_summary.json"
+            events_path = base / "sched_events.jsonl"
+            gpu_path = base / "gpu_samples.jsonl"
+            sys_path = base / "system_samples.jsonl"
+
+            # Anchors at 1000s epoch
+            summary_path.write_text(json.dumps({
+                "start_wall_ns": 1_000_000_000_000,
+                "start_monotonic_ns": 100_000_000,
+            }))
+
+            # 2 events within 100ms: 1 target, 1 system
+            events_path.write_text(
+                json.dumps({"timestamp_ns": 110_000_000, "value": 2000, "is_target": True}) + "\n" +
+                json.dumps({"timestamp_ns": 150_000_000, "value": 8000, "is_target": False}) + "\n"
+            )
+
+            gpu_path.write_text(json.dumps({
+                "timestamp": "1970-01-01T00:16:40.050000Z",
+                "memory_used_mb": 4000.0,
+                "pcie_tx_kb_per_s": 50000,
+                "pcie_rx_kb_per_s": 200000,
+                "source": "nvml",
+            }) + "\n")
+
+            sys_path.write_text(json.dumps({
+                "timestamp": "1970-01-01T00:16:40.050000Z",
+                "mem_available_mb": 8000.0,
+                "disk_read_bytes_per_s": 1000.0,
+                "source": "proc",
+            }) + "\n")
+
+            # 0.1s = 100ms window
+            snaps = generate_aligned_snapshots(
+                run_id="subsecond-test",
+                sched_events_path=events_path,
+                sched_summary_path=summary_path,
+                gpu_samples_path=gpu_path,
+                system_samples_path=sys_path,
+                bucket_sec=0.1,
+            )
+            self.assertGreaterEqual(len(snaps), 1)
+            snap0 = snaps[0]
+            self.assertEqual(snap0["window_ms"], 100)
+            self.assertEqual(snap0["sched"]["scope"], "target_process")
+            self.assertEqual(snap0["sched"]["event_count"], 1)
+            self.assertEqual(snap0["sched"]["system_baseline"]["event_count"], 2)
+            self.assertEqual(snap0["gpu"]["pcie_tx_kb_per_s"], 50000)
+            self.assertEqual(snap0["sources"]["gpu"], "nvml")
 
 
 

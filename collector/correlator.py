@@ -310,8 +310,9 @@ def generate_aligned_snapshots(
     has_anchor = wall_anchor_ns is not None and mono_anchor_ns is not None
 
     # 2. Ingest scheduler events
-    sched_events: list[tuple[float, float]] = []  # (epoch_sec, latency_us)
+    sched_events: list[tuple[float, float, bool]] = []  # (epoch_sec, latency_us, is_target)
     sched_source = "unavailable"
+    has_target_events = False
     if sched_events_path and Path(sched_events_path).exists():
         if strict_anchor and not has_anchor:
             raise ValueError("Cannot align eBPF events to UTC: missing start_wall_ns / start_monotonic_ns.")
@@ -325,9 +326,12 @@ def generate_aligned_snapshots(
                         record = json.loads(line)
                         mono_ns = record.get("timestamp_ns")
                         lat_ns = record.get("value", 0)
+                        is_tgt = bool(record.get("is_target", False))
+                        if is_tgt:
+                            has_target_events = True
                         if mono_ns is not None:
                             wall_ns = wall_anchor_ns + (mono_ns - mono_anchor_ns)
-                            sched_events.append((wall_ns / 1e9, lat_ns / 1000.0))
+                            sched_events.append((wall_ns / 1e9, lat_ns / 1000.0, is_tgt))
                     except Exception:
                         continue
             sched_source = "ebpf_sched"
@@ -390,7 +394,7 @@ def generate_aligned_snapshots(
     # Collect time bounds across available sources
     all_ts: list[float] = []
     if sched_events:
-        all_ts.extend([t for t, _ in sched_events])
+        all_ts.extend([t for t, *_ in sched_events])
     if gpu_samples:
         all_ts.extend([t for t, _ in gpu_samples])
     if sys_samples:
@@ -448,7 +452,7 @@ def generate_aligned_snapshots(
         if w_gpu:
             m_used = [norm.get("memory_used_mb") for norm in w_gpu if norm.get("memory_used_mb") is not None]
             gpu_mem = round(sum(m_used) / len(m_used), 2) if m_used else None
-            gpu_src = "nvidia-smi"
+            gpu_src = w_gpu[-1].get("source", "nvidia-smi")
         else:
             gpu_mem = None
             gpu_src = "unavailable"
@@ -467,6 +471,8 @@ def generate_aligned_snapshots(
                 "pstate",
                 "sm_clock_mhz",
                 "mem_clock_mhz",
+                "pcie_tx_kb_per_s",
+                "pcie_rx_kb_per_s",
             ):
                 if ext_g in latest_gpu and latest_gpu[ext_g] is not None:
                     gpu_section[ext_g] = latest_gpu[ext_g]
@@ -495,16 +501,33 @@ def generate_aligned_snapshots(
         }
 
         # 4. Sched section (windowed - zero copying from global summary!)
-        w_sched = [lat for t, lat in sched_events if w_start <= t < w_end]
+        w_sched = [lat for t, lat, _ in sched_events if w_start <= t < w_end]
         w_sched.sort()
+        w_target = [lat for t, lat, is_tgt in sched_events if w_start <= t < w_end and is_tgt]
+        w_target.sort()
 
-        sched_section: dict[str, Any] = {
-            "scope": "system",
-            "event_count": len(w_sched),
-            "p50_us": _percentile(w_sched, 50),
-            "p95_us": _percentile(w_sched, 95),
-            "p99_us": _percentile(w_sched, 99),
-        }
+        if has_target_events:
+            sched_section: dict[str, Any] = {
+                "scope": "target_process",
+                "event_count": len(w_target),
+                "p50_us": _percentile(w_target, 50),
+                "p95_us": _percentile(w_target, 95),
+                "p99_us": _percentile(w_target, 99),
+                "system_baseline": {
+                    "event_count": len(w_sched),
+                    "p50_us": _percentile(w_sched, 50),
+                    "p95_us": _percentile(w_sched, 95),
+                    "p99_us": _percentile(w_sched, 99),
+                },
+            }
+        else:
+            sched_section: dict[str, Any] = {
+                "scope": "system",
+                "event_count": len(w_sched),
+                "p50_us": _percentile(w_sched, 50),
+                "p95_us": _percentile(w_sched, 95),
+                "p99_us": _percentile(w_sched, 99),
+            }
 
         # Sources dictionary
         sources = {
@@ -562,12 +585,335 @@ def compute_correlation(x: list[float], y: list[float]) -> float | None:
     return round(cov / denom, 4)
 
 
+def compute_lagged_correlation(
+    x: list[float],
+    y: list[float],
+    max_lag: int = 3,
+) -> dict[str, Any]:
+    """Compute cross-correlation across temporal lags tau in [-max_lag, +max_lag].
+
+    A positive lag tau > 0 with high positive r indicates series x leads series y
+    by tau time windows (temporal precedence / potential causal driver).
+    A negative lag tau < 0 indicates series y leads series x.
+    """
+    if len(x) != len(y) or len(x) < (max_lag + 2):
+        return {
+            "lags": [],
+            "correlations": [],
+            "peak_lag": 0,
+            "peak_correlation": None,
+            "causal_direction": "insufficient_data",
+            "interpretation": "Insufficient sample points for lagged cross-correlation.",
+        }
+
+    lags = list(range(-max_lag, max_lag + 1))
+    corrs: list[float | None] = []
+    n = len(x)
+
+    for lag in lags:
+        if lag == 0:
+            r = compute_correlation(x, y)
+        elif lag > 0:
+            r = compute_correlation(x[:n - lag], y[lag:])
+        else:
+            k = -lag
+            r = compute_correlation(x[k:], y[:n - k])
+        corrs.append(r)
+
+    valid_pairs = [(lag, r) for lag, r in zip(lags, corrs) if r is not None]
+    if not valid_pairs:
+        return {
+            "lags": lags,
+            "correlations": corrs,
+            "peak_lag": 0,
+            "peak_correlation": None,
+            "causal_direction": "undefined",
+            "interpretation": "Correlation could not be computed (zero variance).",
+        }
+
+    peak_lag, peak_r = max(valid_pairs, key=lambda pair: abs(pair[1]))
+
+    if abs(peak_r) < 0.3:
+        direction = "no_correlation"
+        interp = f"Weak or no correlation (|r| = {abs(peak_r):.2f} < 0.3)."
+    elif peak_lag > 0:
+        direction = "x_leads_y"
+        interp = f"Series X leads Series Y by {peak_lag} window(s) (r={peak_r:.3f}), indicating temporal precedence."
+    elif peak_lag < 0:
+        direction = "y_leads_x"
+        interp = f"Series Y leads Series X by {-peak_lag} window(s) (r={peak_r:.3f})."
+    else:
+        direction = "synchronous"
+        interp = f"Synchronous co-movement (r={peak_r:.3f} at lag 0)."
+
+    return {
+        "lags": lags,
+        "correlations": corrs,
+        "peak_lag": peak_lag,
+        "peak_correlation": peak_r,
+        "causal_direction": direction,
+        "interpretation": interp,
+    }
+
+
+def analyze_kv_pcie_transfers(
+    kv_transfers_path: Path | str,
+    gpu_samples_path: Path | str,
+    sched_summary_path: Path | str | None = None,
+    pcie_theoretical_bandwidth_mb_per_s: float = 31500.0,
+) -> dict[str, Any]:
+    """Correlate software KV Cache CPU-GPU offload events with hardware PCIe telemetry.
+
+    Parameters
+    ----------
+    kv_transfers_path:
+        Path to `kv_transfers.jsonl` produced by `tools/tracekv_offload.py`.
+    gpu_samples_path:
+        Path to `gpu_samples.jsonl` containing NVML PCIe metrics (`pcie_tx_kb_per_s`, `pcie_rx_kb_per_s`).
+    sched_summary_path:
+        Optional summary JSON with `start_wall_ns` and `start_monotonic_ns` anchors.
+    pcie_theoretical_bandwidth_mb_per_s:
+        Theoretical unidirectional link bandwidth in MB/s (default PCIe 4.0 x16 = ~31,500 MB/s).
+
+    Returns
+    -------
+    dict[str, Any]
+        Physical throughput validation, bus saturation %, and bottleneck assessment.
+    """
+    transfers_p = Path(kv_transfers_path)
+    if not transfers_p.exists():
+        return {
+            "available": False,
+            "reason": f"{kv_transfers_path} not found",
+            "bottleneck": "NO_TRANSFERS",
+        }
+
+    transfers: list[dict[str, Any]] = []
+    with open(transfers_p, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+                if rec.get("status") == "completed":
+                    transfers.append(rec)
+            except Exception:
+                continue
+
+    if not transfers:
+        return {
+            "available": True,
+            "total_transfers": 0,
+            "gpu_to_cpu_transfers": 0,
+            "cpu_to_gpu_transfers": 0,
+            "total_gpu_blocks": 0,
+            "bottleneck": "NO_TRANSFERS",
+            "summary": "No completed KV Cache transfers found.",
+        }
+
+    # Ingest GPU PCIe samples
+    gpu_p = Path(gpu_samples_path)
+    gpu_pcie_samples: list[tuple[float, float, float]] = []  # (epoch_sec, tx_mb_s, rx_mb_s)
+    if gpu_p.exists():
+        with open(gpu_p, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    norm = parse_legacy_gpu_sample(line)
+                    t_str = norm.get("timestamp")
+                    tx_kb = norm.get("pcie_tx_kb_per_s")
+                    rx_kb = norm.get("pcie_rx_kb_per_s")
+                    if t_str:
+                        sec = _iso_to_epoch_sec(t_str)
+                        tx_mb = (tx_kb / 1000.0) if tx_kb is not None else 0.0
+                        rx_mb = (rx_kb / 1000.0) if rx_kb is not None else 0.0
+                        gpu_pcie_samples.append((sec, tx_mb, rx_mb))
+                except Exception:
+                    continue
+
+    gpu_to_cpu = [t for t in transfers if t.get("direction") == "gpu_to_cpu"]
+    cpu_to_gpu = [t for t in transfers if t.get("direction") == "cpu_to_gpu"]
+    total_blocks = sum(t.get("gpu_blocks", 0) for t in transfers)
+    elapsed_ms_list = sorted([t.get("elapsed_ms", 0.0) for t in transfers if t.get("elapsed_ms") is not None])
+
+    peak_tx_mb_s = max([s[1] for s in gpu_pcie_samples], default=0.0)
+    peak_rx_mb_s = max([s[2] for s in gpu_pcie_samples], default=0.0)
+    avg_tx_mb_s = round(sum([s[1] for s in gpu_pcie_samples]) / len(gpu_pcie_samples), 2) if gpu_pcie_samples else 0.0
+    avg_rx_mb_s = round(sum([s[2] for s in gpu_pcie_samples]) / len(gpu_pcie_samples), 2) if gpu_pcie_samples else 0.0
+
+    peak_throughput_mb_s = max(peak_tx_mb_s, peak_rx_mb_s)
+    bus_saturation_pct = round(
+        (peak_throughput_mb_s / pcie_theoretical_bandwidth_mb_per_s) * 100.0, 2
+    ) if pcie_theoretical_bandwidth_mb_per_s > 0 else 0.0
+
+    elapsed_p50 = _percentile(elapsed_ms_list, 50)
+    elapsed_p95 = _percentile(elapsed_ms_list, 95)
+    elapsed_p99 = _percentile(elapsed_ms_list, 99)
+    elapsed_mean = round(sum(elapsed_ms_list) / len(elapsed_ms_list), 2) if elapsed_ms_list else None
+
+    if bus_saturation_pct >= 75.0:
+        bottleneck = "PCIE_BUS_SATURATION"
+        diagnostic = f"PCIe bus saturated ({bus_saturation_pct}% of theoretical link capacity). KV transfer rate bounded by physical interconnect."
+    elif (elapsed_p95 is not None and elapsed_p95 >= 10.0) and bus_saturation_pct < 25.0:
+        bottleneck = "HOST_QUEUE_OR_SCHEDULING_STALL"
+        diagnostic = f"KV transfer latency high (P95={elapsed_p95}ms) but physical PCIe saturation is low ({bus_saturation_pct}%). Delay was dominated by host thread dispatch, polling, or CPU scheduling."
+    else:
+        bottleneck = "BALANCED_TRANSFER"
+        diagnostic = f"KV transfers operating normally with {bus_saturation_pct}% peak PCIe utilization."
+
+    return {
+        "available": True,
+        "total_transfers": len(transfers),
+        "gpu_to_cpu_transfers": len(gpu_to_cpu),
+        "cpu_to_gpu_transfers": len(cpu_to_gpu),
+        "total_gpu_blocks": total_blocks,
+        "elapsed_ms": {
+            "p50": elapsed_p50,
+            "p95": elapsed_p95,
+            "p99": elapsed_p99,
+            "mean": elapsed_mean,
+        },
+        "pcie_physical": {
+            "theoretical_max_mb_per_s": pcie_theoretical_bandwidth_mb_per_s,
+            "peak_tx_mb_per_s": round(peak_tx_mb_s, 2),
+            "peak_rx_mb_per_s": round(peak_rx_mb_s, 2),
+            "avg_tx_mb_per_s": avg_tx_mb_s,
+            "avg_rx_mb_per_s": avg_rx_mb_s,
+            "bus_saturation_pct": bus_saturation_pct,
+        },
+        "bottleneck": bottleneck,
+        "diagnostic": diagnostic,
+    }
+
+
+def diagnose_system_bottlenecks(
+    snapshots: list[dict[str, Any]],
+    lagged_corr: dict[str, Any] | None = None,
+    kv_pcie: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Automated root-cause bottleneck attribution across CPU, GPU, memory, and PCIe.
+
+    Evaluates OS kernel scheduling delays, hardware interconnect saturation,
+    Linux PSI pressure, and GPU compute starvation to pinpoint the primary
+    performance limiter for the LLM inference experiment.
+    """
+    if not snapshots:
+        return {
+            "primary_bottleneck": "INSUFFICIENT_DATA",
+            "severity": "INFO",
+            "summary": "No aligned snapshots provided for bottleneck diagnosis.",
+            "recommendations": ["Collect at least 2 aligned snapshots."],
+        }
+
+    run_id = snapshots[0].get("run_id", "unknown")
+
+    sched_p99_list = [
+        s.get("sched", {}).get("p99_us")
+        for s in snapshots
+        if s.get("sched", {}).get("p99_us") is not None
+    ]
+    sched_scope = snapshots[0].get("sched", {}).get("scope", "system")
+    max_sched_p99_us = max(sched_p99_list, default=0.0)
+
+    psi_cpu_list = []
+    psi_mem_list = []
+    psi_io_list = []
+    for s in snapshots:
+        psi = s.get("system", {}).get("psi") or {}
+        if "psi_cpu_some_avg10" in psi and psi["psi_cpu_some_avg10"] is not None:
+            psi_cpu_list.append(psi["psi_cpu_some_avg10"])
+        if "psi_mem_some_avg10" in psi and psi["psi_mem_some_avg10"] is not None:
+            psi_mem_list.append(psi["psi_mem_some_avg10"])
+        if "psi_io_some_avg10" in psi and psi["psi_io_some_avg10"] is not None:
+            psi_io_list.append(psi["psi_io_some_avg10"])
+
+    max_psi_cpu = max(psi_cpu_list, default=0.0)
+    max_psi_mem = max(psi_mem_list, default=0.0)
+    max_psi_io = max(psi_io_list, default=0.0)
+
+    gpu_util_list = [
+        s.get("gpu", {}).get("utilization_pct")
+        for s in snapshots
+        if s.get("gpu", {}).get("utilization_pct") is not None
+    ]
+    avg_gpu_util = round(sum(gpu_util_list) / len(gpu_util_list), 1) if gpu_util_list else 0.0
+
+    pcie_sat = (kv_pcie or {}).get("pcie_physical", {}).get("bus_saturation_pct", 0.0)
+    kv_bot = (kv_pcie or {}).get("bottleneck")
+
+    recommendations: list[str] = []
+
+    if max_sched_p99_us >= 5000.0 or max_psi_cpu >= 25.0:
+        primary = "HOST_SCHEDULING_CONTENTION"
+        severity = "CRITICAL" if max_sched_p99_us >= 10000.0 else "WARNING"
+        summary = (
+            f"Host CPU scheduling contention detected: target thread queue delay P99 reached "
+            f"{max_sched_p99_us / 1000.0:.2f}ms (PSI CPU avg10={max_psi_cpu:.1f}%). "
+            f"Inference workers were delayed entering runqueue."
+        )
+        recommendations.append("Pin vLLM engine threads to dedicated physical cores using taskset / sched_setaffinity.")
+        recommendations.append("Increase process scheduling priority or set SCHED_FIFO for time-critical token dispatch.")
+        if lagged_corr and lagged_corr.get("causal_direction") == "x_leads_y":
+            summary += f" Lagged cross-correlation confirmed CPU latency precedes GPU utilization drop by {lagged_corr['peak_lag']} window(s)."
+
+    elif kv_bot == "PCIE_BUS_SATURATION" or pcie_sat >= 75.0:
+        primary = "PCIE_BUS_SATURATION"
+        severity = "WARNING"
+        summary = f"Physical PCIe interconnect saturated ({pcie_sat}% utilization). CPU-GPU KV transfers are bounded by bus bandwidth."
+        recommendations.append("Reduce KV Cache eviction frequency by allocating more GPU VRAM or increasing block size.")
+        recommendations.append("Batch KV transfer requests to avoid concurrent bus contention.")
+
+    elif max_psi_mem >= 20.0 or max_psi_io >= 20.0:
+        primary = "SYSTEM_MEMORY_IO_PRESSURE"
+        severity = "CRITICAL"
+        summary = f"Host memory / IO pressure elevated (PSI Mem={max_psi_mem}%, PSI IO={max_psi_io}%). System is paging or under heavy disk load."
+        recommendations.append("Reduce CPU offload memory buffer capacity to prevent host OS page thrashing.")
+        recommendations.append("Isolate inference workload from concurrent disk I/O intensive processes.")
+
+    elif avg_gpu_util >= 85.0 and max_sched_p99_us < 2000.0:
+        primary = "GPU_COMPUTE_BOUND"
+        severity = "INFO"
+        summary = f"Inference is compute bound on GPU (average utilization={avg_gpu_util}%, CPU queue latency healthy < 2ms)."
+        recommendations.append("System and scheduling baseline is healthy; consider tensor parallelism for higher throughput.")
+
+    else:
+        primary = "BALANCED"
+        severity = "INFO"
+        summary = "No dominant system bottleneck detected across scheduling, PCIe, memory, or GPU."
+        recommendations.append("Workload operating within normal resource bounds.")
+
+    return {
+        "run_id": run_id,
+        "primary_bottleneck": primary,
+        "severity": severity,
+        "summary": summary,
+        "metrics_summary": {
+            "sched_scope": sched_scope,
+            "max_sched_p99_us": max_sched_p99_us,
+            "max_psi_cpu_avg10": max_psi_cpu,
+            "max_psi_mem_avg10": max_psi_mem,
+            "max_psi_io_avg10": max_psi_io,
+            "avg_gpu_utilization_pct": avg_gpu_util,
+            "peak_pcie_bus_saturation_pct": pcie_sat,
+        },
+        "lagged_correlation": lagged_corr,
+        "kv_pcie_transfer_analysis": kv_pcie,
+        "recommendations": recommendations,
+    }
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="TraceKV Cross-Layer Alignment Engine (v0.2)")
+    parser = argparse.ArgumentParser(description="TraceKV Cross-Layer Alignment & Diagnosis Engine (v0.2)")
     parser.add_argument("--run-id", required=True, help="Experiment run ID")
     parser.add_argument("--dir", type=Path, default=None, help="Directory containing experiment artifacts")
     parser.add_argument("--out", type=Path, default=None, help="Output aligned_snapshots.jsonl path")
     parser.add_argument("--bucket-sec", type=float, default=1.0, help="Window duration in seconds")
+    parser.add_argument("--kv-transfers", type=Path, default=None, help="Path to kv_transfers.jsonl")
+    parser.add_argument("--diagnose", action="store_true", help="Run automated bottleneck root cause diagnosis")
+    parser.add_argument("--diagnosis-out", type=Path, default=None, help="Path for bottleneck_diagnosis.json output")
     args = parser.parse_args()
 
     base_dir = args.dir or Path(f"results/{args.run_id}")
@@ -578,6 +924,7 @@ def main() -> None:
     gpu_samples = base_dir / "gpu_samples.jsonl"
     system_samples = base_dir / "system_samples.jsonl"
     kv_samples = base_dir / "kv_samples.jsonl"
+    kv_transfers = args.kv_transfers or base_dir / "kv_transfers.jsonl"
 
     print(f"Aligning experiment artifacts from {base_dir} -> {out_file}...")
     snapshots = generate_aligned_snapshots(
@@ -591,6 +938,31 @@ def main() -> None:
     )
     count = write_aligned_snapshots(snapshots, out_file)
     print(f"Successfully generated {count} aligned snapshots in {out_file}.")
+
+    if args.diagnose:
+        # 1. Cross-correlation between sched latency and GPU utilization
+        sched_series = [s.get("sched", {}).get("p50_us") or 0.0 for s in snapshots]
+        gpu_series = [s.get("gpu", {}).get("utilization_pct") or 0.0 for s in snapshots]
+        lagged = compute_lagged_correlation(sched_series, gpu_series, max_lag=3)
+
+        # 2. KV PCIe transfer analysis
+        kv_pcie = None
+        if kv_transfers.exists() and gpu_samples.exists():
+            kv_pcie = analyze_kv_pcie_transfers(
+                kv_transfers_path=kv_transfers,
+                gpu_samples_path=gpu_samples,
+                sched_summary_path=sched_summary if sched_summary.exists() else None,
+            )
+
+        # 3. Diagnosis
+        diag = diagnose_system_bottlenecks(snapshots, lagged_corr=lagged, kv_pcie=kv_pcie)
+        diag_out = args.diagnosis_out or base_dir / "bottleneck_diagnosis.json"
+        diag_out.parent.mkdir(parents=True, exist_ok=True)
+        with open(diag_out, "w", encoding="utf-8") as f:
+            json.dump(diag, f, indent=2, ensure_ascii=False)
+        print(f"Bottleneck diagnosis saved -> {diag_out}")
+        print(f"  Primary Bottleneck: [{diag['severity']}] {diag['primary_bottleneck']}")
+        print(f"  Summary: {diag['summary']}")
 
 
 if __name__ == "__main__":

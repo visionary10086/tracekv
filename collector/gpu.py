@@ -384,11 +384,12 @@ def parse_legacy_gpu_sample(record: dict[str, Any] | str, run_id: str = "") -> d
     if isinstance(record, str):
         record = json.loads(record)
 
-    # 1. Native v0.2 format
-    if "memory_used_mb" in record and "source" in record:
+    # 1. Native v0.2 or partially normalized format
+    if "memory_used_mb" in record or "pcie_tx_kb_per_s" in record or "pcie_rx_kb_per_s" in record:
         res = dict(record)
         if run_id and not res.get("run_id"):
             res["run_id"] = run_id
+        res.setdefault("source", "nvml" if "pcie_tx_kb_per_s" in record else "nvidia-smi")
         return res
 
     # 2. Legacy baseline format
