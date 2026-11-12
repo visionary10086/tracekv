@@ -1,0 +1,107 @@
+#!/usr/bin/env bpftrace
+/*
+ * sched_latency.bt — CPU Scheduler Wakeup-to-Run Latency Tracer
+ *
+ * Measures the time between a task being woken up (placed on the run queue)
+ * and actually being scheduled onto a CPU (context-switched in).
+ *
+ * Output format (one line per matched event, pipe-delimited):
+ *   SCHED|<switch_ns>|<wakeup_ns>|<tid>|<cpu>|<latency_ns>|<comm>
+ *
+ * Diagnostic counters are printed on exit with prefix STAT|.
+ *
+ * Designed for bpftrace >= 0.20.  Fields verified against the running
+ * kernel's BTF (6.18.54.1-microsoft-standard-WSL2):
+ *   sched_wakeup_template.pid  = target TID (offset 24)
+ *   sched_switch.next_pid      = scheduled-in TID (offset 56)
+ *
+ * Author: 邓智文 (DAGER)
+ * Project: TraceKV — collector/ebpf/sched_latency.bt
+ */
+
+BEGIN
+{
+    printf("HEADER|switch_ns|wakeup_ns|tid|cpu|latency_ns|comm\n");
+    @dup_wakeup = 0;
+    @unmatched_switch = 0;
+    @exit_cleanup = 0;
+    @matched = 0;
+}
+
+/*
+ * sched_wakeup / sched_wakeup_new
+ *
+ * args->pid is the TID of the TARGET task being woken.
+ * We record the monotonic timestamp keyed by that TID.
+ *
+ * If the TID already has a pending wakeup record we do NOT overwrite,
+ * preserving the earliest enqueue time.  We count duplicates instead.
+ */
+tracepoint:sched:sched_wakeup
+{
+    if (@enqueue_ts[args.pid] == 0) {
+        @enqueue_ts[args.pid] = nsecs;
+    } else {
+        @dup_wakeup++;
+    }
+}
+
+tracepoint:sched:sched_wakeup_new
+{
+    if (@enqueue_ts[args.pid] == 0) {
+        @enqueue_ts[args.pid] = nsecs;
+    } else {
+        @dup_wakeup++;
+    }
+}
+
+/*
+ * sched_switch
+ *
+ * args->next_pid is the TID of the task being switched IN.
+ * We look it up in the map.  On match we emit the event and delete the key.
+ * On miss (task was already running, or tracer started after wakeup) we
+ * count an unmatched switch — this is normal, not an error.
+ */
+tracepoint:sched:sched_switch
+{
+    $wakeup_ts = @enqueue_ts[args.next_pid];
+    if ($wakeup_ts != 0) {
+        $latency = nsecs - $wakeup_ts;
+        printf("SCHED|%llu|%llu|%d|%d|%llu|%s\n",
+               nsecs, $wakeup_ts, args.next_pid, cpu, $latency,
+               args.next_comm);
+        delete(@enqueue_ts[args.next_pid]);
+        @matched++;
+    } else {
+        /* next_pid == 0 is the idle task — never tracked */
+        if (args.next_pid != 0) {
+            @unmatched_switch++;
+        }
+    }
+}
+
+/*
+ * sched_process_exit — clean up map entries for exiting tasks.
+ * args->pid here is the TID of the exiting task.
+ */
+tracepoint:sched:sched_process_exit
+{
+    if (@enqueue_ts[args.pid] != 0) {
+        delete(@enqueue_ts[args.pid]);
+        @exit_cleanup++;
+    }
+}
+
+END
+{
+    printf("STAT|matched|%llu\n", @matched);
+    printf("STAT|dup_wakeup|%llu\n", @dup_wakeup);
+    printf("STAT|unmatched_switch|%llu\n", @unmatched_switch);
+    printf("STAT|exit_cleanup|%llu\n", @exit_cleanup);
+    clear(@enqueue_ts);
+    clear(@dup_wakeup);
+    clear(@unmatched_switch);
+    clear(@exit_cleanup);
+    clear(@matched);
+}
