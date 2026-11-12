@@ -333,7 +333,7 @@ def generate_aligned_snapshots(
             sched_source = "ebpf_sched"
 
     # 3. Ingest GPU samples
-    gpu_samples: list[tuple[float, float | None]] = []  # (epoch_sec, memory_used_mb)
+    gpu_samples: list[tuple[float, dict[str, Any]]] = []
     if gpu_samples_path and Path(gpu_samples_path).exists():
         with open(gpu_samples_path, "r", encoding="utf-8") as f:
             for line in f:
@@ -345,12 +345,12 @@ def generate_aligned_snapshots(
                     t_str = norm.get("timestamp")
                     if t_str:
                         sec = _iso_to_epoch_sec(t_str)
-                        gpu_samples.append((sec, norm.get("memory_used_mb")))
+                        gpu_samples.append((sec, norm))
                 except Exception:
                     continue
 
     # 4. Ingest system samples
-    sys_samples: list[tuple[float, float | None]] = []  # (epoch_sec, mem_available_mb)
+    sys_samples: list[tuple[float, dict[str, Any]]] = []
     if system_samples_path and Path(system_samples_path).exists():
         with open(system_samples_path, "r", encoding="utf-8") as f:
             for line in f:
@@ -361,7 +361,7 @@ def generate_aligned_snapshots(
                     rec = json.loads(line)
                     t_str = rec.get("timestamp")
                     if t_str and rec.get("mem_available_mb") is not None:
-                        sys_samples.append((_iso_to_epoch_sec(t_str), float(rec["mem_available_mb"])))
+                        sys_samples.append((_iso_to_epoch_sec(t_str), rec))
                 except Exception:
                     continue
 
@@ -420,28 +420,56 @@ def generate_aligned_snapshots(
         w_end_utc = _epoch_to_iso_utc(w_end)
 
         # 1. System section
-        w_sys_mems = [m for t, m in sys_samples if w_start <= t < w_end and m is not None]
-        if w_sys_mems:
-            mem_avail = round(sum(w_sys_mems) / len(w_sys_mems), 3)
+        w_sys = [rec for t, rec in sys_samples if w_start <= t < w_end]
+        if w_sys:
+            mems = [rec.get("mem_available_mb") for rec in w_sys if rec.get("mem_available_mb") is not None]
+            mem_avail = round(sum(mems) / len(mems), 3) if mems else None
+            disk_r = [rec.get("disk_read_bytes_per_s") for rec in w_sys if rec.get("disk_read_bytes_per_s") is not None]
+            disk_r_bytes = round(sum(disk_r) / len(disk_r), 1) if disk_r else None
             sys_src = "proc"
         else:
             mem_avail = None
+            disk_r_bytes = None
             sys_src = "unavailable"
 
         system_section: dict[str, Any] = {
             "mem_available_mb": mem_avail,
             "disk_read_p95_ms": None,
-            "disk_read_bytes_per_s": None,
+            "disk_read_bytes_per_s": disk_r_bytes,
         }
+        if w_sys:
+            latest_sys = w_sys[-1]
+            for ext_k in ("cpu", "memory", "psi", "io", "target_process"):
+                if ext_k in latest_sys and latest_sys[ext_k] is not None:
+                    system_section[ext_k] = latest_sys[ext_k]
 
         # 2. GPU section
-        w_gpu_mems = [m for t, m in gpu_samples if w_start <= t < w_end and m is not None]
-        if w_gpu_mems:
-            gpu_mem = round(sum(w_gpu_mems) / len(w_gpu_mems), 2)
+        w_gpu = [norm for t, norm in gpu_samples if w_start <= t < w_end]
+        if w_gpu:
+            m_used = [norm.get("memory_used_mb") for norm in w_gpu if norm.get("memory_used_mb") is not None]
+            gpu_mem = round(sum(m_used) / len(m_used), 2) if m_used else None
             gpu_src = "nvidia-smi"
         else:
             gpu_mem = None
             gpu_src = "unavailable"
+
+        gpu_section: dict[str, Any] = {"memory_used_mb": gpu_mem}
+        if w_gpu:
+            latest_gpu = w_gpu[-1]
+            for ext_g in (
+                "memory_total_mb",
+                "memory_free_mb",
+                "memory_used_pct",
+                "utilization_pct",
+                "utilization_memory_pct",
+                "temperature_c",
+                "power_w",
+                "pstate",
+                "sm_clock_mhz",
+                "mem_clock_mhz",
+            ):
+                if ext_g in latest_gpu and latest_gpu[ext_g] is not None:
+                    gpu_section[ext_g] = latest_gpu[ext_g]
 
         # 3. KV section
         w_kvs = [kv for kv in kv_samples if w_start <= kv[0] < w_end]
@@ -493,7 +521,7 @@ def generate_aligned_snapshots(
             "window_end_utc": w_end_utc,
             "window_ms": window_ms,
             "system": system_section,
-            "gpu": {"memory_used_mb": gpu_mem},
+            "gpu": gpu_section,
             "kv": kv_section,
             "sources": sources,
             "sched": sched_section,

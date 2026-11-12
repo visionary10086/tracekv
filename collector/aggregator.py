@@ -140,6 +140,27 @@ def build_unified_snapshot(
     end_ts = sys_raw.get("timestamp") or utc_now()
     start_ts = _compute_window_start(end_ts, eff_window_ms)
 
+    # Enrich system and gpu sections with detailed telemetry if present
+    for k in ("cpu", "memory", "psi", "io", "target_process"):
+        if k in sys_raw and sys_raw[k] is not None:
+            system_section[k] = sys_raw[k]
+
+    gpu_section: dict[str, Any] = {"memory_used_mb": gpu_mem}
+    for k in (
+        "memory_total_mb",
+        "memory_free_mb",
+        "memory_used_pct",
+        "utilization_pct",
+        "utilization_memory_pct",
+        "temperature_c",
+        "power_w",
+        "pstate",
+        "sm_clock_mhz",
+        "mem_clock_mhz",
+    ):
+        if k in gpu_raw and gpu_raw[k] is not None:
+            gpu_section[k] = gpu_raw[k]
+
     snapshot: dict[str, Any] = {
         "schema_version": "0.1",
         "run_id": effective_run_id,
@@ -148,7 +169,7 @@ def build_unified_snapshot(
         "window_end_utc": end_ts,
         "window_ms": eff_window_ms,
         "system": system_section,
-        "gpu": {"memory_used_mb": gpu_mem},
+        "gpu": gpu_section,
         "kv": kv_data,
         "sources": {
             "system": sys_source,

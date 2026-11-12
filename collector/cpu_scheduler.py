@@ -83,6 +83,8 @@ class CollectorStats:
     p95_ns: int | None = None
     p99_ns: int | None = None
     mean_ns: float | None = None
+    distinct_tids_count: int = 0
+    top_comms: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -253,6 +255,8 @@ def stats_to_dict(result: CollectorResult) -> dict:
         "p50_ns": s.p50_ns,
         "p95_ns": s.p95_ns,
         "p99_ns": s.p99_ns,
+        "distinct_tids_count": s.distinct_tids_count,
+        "top_comms": s.top_comms,
         "kernel_source": result.kernel_source,
         "kernel_build": result.kernel_build,
         "bpftrace_exit_code": result.bpftrace_exit_code,
@@ -291,6 +295,8 @@ def process_stream(
     result = CollectorResult(run_id=run_id, start_anchor=anchor)
     sample_reservoir: list[int] = []
     rng = random.Random(random_seed) if random_seed is not None else random.Random()
+    seen_tids: set[int] = set()
+    comm_counts: dict[str, int] = {}
 
     for raw_line in stream:
         line = raw_line.rstrip("\n").rstrip("\r")
@@ -322,6 +328,8 @@ def process_stream(
             # Exact online streaming aggregations
             result.stats.event_count += 1
             result.stats.sum_ns += event.latency_ns
+            seen_tids.add(event.tid)
+            comm_counts[event.comm] = comm_counts.get(event.comm, 0) + 1
             if result.stats.min_ns is None or event.latency_ns < result.stats.min_ns:
                 result.stats.min_ns = event.latency_ns
             if result.stats.max_ns is None or event.latency_ns > result.stats.max_ns:
@@ -343,6 +351,10 @@ def process_stream(
         result.stats.parser_error_count += 1
 
     # Finalize summary statistics
+    result.stats.distinct_tids_count = len(seen_tids)
+    sorted_comms = sorted(comm_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+    result.stats.top_comms = dict(sorted_comms)
+
     if result.stats.event_count > 0:
         result.stats.mean_ns = result.stats.sum_ns / result.stats.event_count
         if sample_reservoir:

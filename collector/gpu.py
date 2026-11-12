@@ -1,7 +1,8 @@
 """Real GPU memory and utilization sampler for NVIDIA GPUs (WSL2 / Linux).
 
-Uses `nvidia-smi` to query current VRAM usage, utilization, temperature, and power,
-converting to standard decimal MB consistent with `contracts/schema.py` and
+Uses `nvidia-smi` to query current VRAM usage, utilization, temperature, power,
+memory bandwidth utilization, clock frequencies, and performance states.
+Converts memory to standard decimal MB consistent with `contracts/schema.py` and
 `docs/联调接口规范_v0.2.md`.
 
 Supports one-shot collection, continuous background monitoring (`GpuMonitor`),
@@ -66,12 +67,22 @@ def _parse_int(val: str | None) -> int | None:
         return None
 
 
+def _parse_str(val: str | None) -> str | None:
+    """Parse a string property, returning None if missing or unsupported."""
+    if val is None:
+        return None
+    cleaned = val.strip()
+    if not cleaned or cleaned.lower() in ("n/a", "[not supported]", "not supported", "[n/a]"):
+        return None
+    return cleaned
+
+
 def collect_gpu_metrics(
     binary_path: str | None = None,
     gpu_index: int = 0,
     run_id: str = "",
 ) -> dict[str, Any]:
-    """Query current GPU metrics conforming to TraceKV v0.2 specification.
+    """Query rich GPU metrics conforming to TraceKV v0.2 specification.
 
     Returns a dict with:
         run_id: str
@@ -80,9 +91,15 @@ def collect_gpu_metrics(
         gpu_uuid: str | None
         memory_used_mb: Decimal megabytes (1,000,000 bytes)
         memory_total_mb: Decimal megabytes
-        utilization_pct: GPU core utilization percentage (0 - 100)
+        memory_free_mb: Decimal megabytes
+        memory_used_pct: Percentage of VRAM used (0 - 100)
+        utilization_pct: GPU compute core utilization percentage (0 - 100)
+        utilization_memory_pct: GPU memory bandwidth utilization percentage (0 - 100)
         temperature_c: Temperature in degrees Celsius
         power_w: Power draw in Watts
+        pstate: Performance state (e.g. 'P0', 'P2')
+        sm_clock_mhz: SM clock frequency in MHz
+        mem_clock_mhz: Memory clock frequency in MHz
         source: 'nvidia-smi' or 'unavailable'
     """
     now_iso = _utc_now_iso()
@@ -93,9 +110,15 @@ def collect_gpu_metrics(
         "gpu_uuid": None,
         "memory_used_mb": None,
         "memory_total_mb": None,
+        "memory_free_mb": None,
+        "memory_used_pct": None,
         "utilization_pct": None,
+        "utilization_memory_pct": None,
         "temperature_c": None,
         "power_w": None,
+        "pstate": None,
+        "sm_clock_mhz": None,
+        "mem_clock_mhz": None,
         "source": "unavailable",
     }
 
@@ -106,7 +129,7 @@ def collect_gpu_metrics(
     cmd = [
         smi,
         f"--id={gpu_index}",
-        "--query-gpu=index,gpu_uuid,memory.used,memory.total,utilization.gpu,temperature.gpu,power.draw",
+        "--query-gpu=index,gpu_uuid,memory.used,memory.total,memory.free,utilization.gpu,utilization.memory,temperature.gpu,power.draw,pstate,clocks.current.sm,clocks.current.memory",
         "--format=csv,noheader,nounits",
     ]
 
@@ -136,14 +159,33 @@ def collect_gpu_metrics(
         uuid_str: str | None = None
         used_mib: float | None = None
         total_mib: float | None = None
+        free_mib: float | None = None
         util_pct: float | None = None
+        util_mem_pct: float | None = None
         temp_c: float | None = None
         power_w: float | None = None
+        pstate_str: str | None = None
+        sm_clk: int | None = None
+        mem_clk: int | None = None
 
-        if len(parts) >= 7:
+        if len(parts) >= 12:
             parsed_index = _parse_int(parts[0])
             eff_index = parsed_index if parsed_index is not None else gpu_index
-            uuid_str = parts[1].strip() if parts[1].strip() else None
+            uuid_str = _parse_str(parts[1])
+            used_mib = _parse_float(parts[2])
+            total_mib = _parse_float(parts[3])
+            free_mib = _parse_float(parts[4])
+            util_pct = _parse_float(parts[5])
+            util_mem_pct = _parse_float(parts[6])
+            temp_c = _parse_float(parts[7])
+            power_w = _parse_float(parts[8])
+            pstate_str = _parse_str(parts[9])
+            sm_clk = _parse_int(parts[10])
+            mem_clk = _parse_int(parts[11])
+        elif len(parts) == 7:
+            parsed_index = _parse_int(parts[0])
+            eff_index = parsed_index if parsed_index is not None else gpu_index
+            uuid_str = _parse_str(parts[1])
             used_mib = _parse_float(parts[2])
             total_mib = _parse_float(parts[3])
             util_pct = _parse_float(parts[4])
@@ -166,6 +208,8 @@ def collect_gpu_metrics(
         # Convert MiB to decimal MB (1,000,000 bytes)
         used_mb = round(used_mib * 1024 * 1024 / 1_000_000, 2) if used_mib is not None else None
         total_mb = round(total_mib * 1024 * 1024 / 1_000_000, 2) if total_mib is not None else None
+        free_mb = round(free_mib * 1024 * 1024 / 1_000_000, 2) if free_mib is not None else None
+        used_pct = round((used_mb / total_mb) * 100.0, 1) if used_mb is not None and total_mb else None
 
         return {
             "run_id": run_id,
@@ -174,9 +218,15 @@ def collect_gpu_metrics(
             "gpu_uuid": uuid_str,
             "memory_used_mb": used_mb,
             "memory_total_mb": total_mb,
+            "memory_free_mb": free_mb,
+            "memory_used_pct": used_pct,
             "utilization_pct": util_pct,
+            "utilization_memory_pct": util_mem_pct,
             "temperature_c": temp_c,
             "power_w": power_w,
+            "pstate": pstate_str,
+            "sm_clock_mhz": sm_clk,
+            "mem_clock_mhz": mem_clk,
             "source": "nvidia-smi",
         }
     except (subprocess.TimeoutExpired, OSError, ValueError, IndexError):
@@ -228,6 +278,7 @@ def parse_legacy_gpu_sample(record: dict[str, Any] | str, run_id: str = "") -> d
 
     used_mb = round(used_mib * 1024 * 1024 / 1_000_000, 2) if used_mib is not None else None
     total_mb = round(total_mib * 1024 * 1024 / 1_000_000, 2) if total_mib is not None else None
+    used_pct = round((used_mb / total_mb) * 100.0, 1) if used_mb is not None and total_mb else None
 
     return {
         "run_id": record.get("run_id") or run_id,
@@ -236,9 +287,15 @@ def parse_legacy_gpu_sample(record: dict[str, Any] | str, run_id: str = "") -> d
         "gpu_uuid": record.get("gpu_uuid"),
         "memory_used_mb": used_mb,
         "memory_total_mb": total_mb,
+        "memory_free_mb": None,
+        "memory_used_pct": used_pct,
         "utilization_pct": util_pct,
+        "utilization_memory_pct": None,
         "temperature_c": temp_c,
         "power_w": power_w,
+        "pstate": None,
+        "sm_clock_mhz": None,
+        "mem_clock_mhz": None,
         "source": "nvidia-smi" if used_mb is not None else "unavailable",
     }
 
@@ -303,7 +360,7 @@ class GpuMonitor:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="TraceKV GPU Telemetry Sampler (v0.2)")
+    parser = argparse.ArgumentParser(description="TraceKV Enriched GPU Telemetry Sampler (v0.2)")
     parser.add_argument("--run-id", default="test-gpu-run", help="Experiment run ID")
     parser.add_argument("--out", type=Path, default=None, help="Output JSONL path")
     parser.add_argument("--interval", type=float, default=1.0, help="Sampling interval in seconds")

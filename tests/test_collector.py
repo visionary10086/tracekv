@@ -967,6 +967,105 @@ class TestV02Integration(unittest.TestCase):
                     strict_anchor=True,
                 )
 
+    def test_enriched_gpu_12_fields(self):
+        """Verify 12-field GPU query parsing with memory bandwidth and PState."""
+        from collector.gpu import collect_gpu_metrics
+        mock_12 = "0, GPU-4080-UUID, 4000, 12000, 8000, 60, 25, 45.0, 50.5, P0, 2000, 9000\n"
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=mock_12)
+            res = collect_gpu_metrics(binary_path="/mock/smi", run_id="gpu-rich")
+            self.assertEqual(res["gpu_uuid"], "GPU-4080-UUID")
+            self.assertAlmostEqual(res["memory_free_mb"], 8388.61, places=1)
+            self.assertEqual(res["utilization_pct"], 60.0)
+            self.assertEqual(res["utilization_memory_pct"], 25.0)
+            self.assertEqual(res["pstate"], "P0")
+            self.assertEqual(res["sm_clock_mhz"], 2000)
+            self.assertEqual(res["mem_clock_mhz"], 9000)
+
+    def test_enriched_system_psi_and_stat(self):
+        """Verify CPU utilization, PSI pressure, diskstats, and swap calculation."""
+        from collector.system import collect_system_sample
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            meminfo = base / "meminfo"
+            meminfo.write_text(
+                "MemTotal:       16000000 kB\n"
+                "MemFree:         4000000 kB\n"
+                "MemAvailable:    8000000 kB\n"
+                "SwapTotal:       2000000 kB\n"
+                "SwapFree:        1500000 kB\n"
+            )
+            stat = base / "stat"
+            stat.write_text("cpu  100 0 50 850 0 0 0 0 0 0\nctxt 5000\n")
+            loadavg = base / "loadavg"
+            loadavg.write_text("0.50 0.40 0.30 3/500 12345\n")
+
+            p_dir = base / "pressure"
+            p_dir.mkdir()
+            (p_dir / "cpu").write_text("some avg10=2.50 avg60=1.00 avg300=0.50 total=1000\n")
+            (p_dir / "memory").write_text("some avg10=1.20 avg60=0.80 avg300=0.20 total=500\nfull avg10=0.50 avg60=0.20 avg300=0.05 total=200\n")
+            (p_dir / "io").write_text("some avg10=3.00 avg60=1.50 avg300=0.80 total=800\nfull avg10=1.00 avg60=0.50 avg300=0.10 total=300\n")
+
+            diskstats = base / "diskstats"
+            diskstats.write_text("   8       0 sda 100 0 2000 100 50 0 1000 50 0 100 100\n")
+
+            # Sample 1
+            sample1, state1 = collect_system_sample(
+                run_id="sys-rich",
+                meminfo_path=meminfo,
+                stat_path=stat,
+                loadavg_path=loadavg,
+                pressure_dir=p_dir,
+                diskstats_path=diskstats,
+                return_state=True,
+            )
+            self.assertEqual(sample1["memory"]["swap_used_pct"], 25.0)
+            self.assertEqual(sample1["psi"]["psi_cpu_some_avg10"], 2.5)
+            self.assertEqual(sample1["psi"]["psi_io_some_avg10"], 3.0)
+            self.assertEqual(sample1["cpu"]["running_threads"], 3)
+            self.assertEqual(sample1["cpu"]["total_threads"], 500)
+
+            # Sample 2 with delta
+            time.sleep(0.05)
+            stat.write_text("cpu  120 0 60 860 0 0 0 0 0 0\nctxt 5100\n")
+            diskstats.write_text("   8       0 sda 110 0 2200 110 55 0 1100 55 0 110 110\n")
+
+            sample2, state2 = collect_system_sample(
+                run_id="sys-rich",
+                meminfo_path=meminfo,
+                stat_path=stat,
+                loadavg_path=loadavg,
+                pressure_dir=p_dir,
+                diskstats_path=diskstats,
+                prev_state=state1,
+                return_state=True,
+            )
+            # Total delta: (120-100)+(60-50)+(860-850) = 20 + 10 + 10 = 40 ticks
+            # Idle delta: 10 ticks -> cpu_util = (1 - 10/40) * 100 = 75.0%
+            self.assertEqual(sample2["cpu"]["utilization_pct"], 75.0)
+            self.assertGreater(sample2["cpu"]["ctxt_switches_per_s"], 0)
+            self.assertGreater(sample2["io"]["read_bytes_per_s"], 0)
+
+    def test_top_comms_and_distinct_tids(self):
+        """Verify distinct TIDs and top contending process ranking in cpu_scheduler."""
+        from collector.cpu_scheduler import process_stream
+        lines = [
+            "HEADER|switch_ns|wakeup_ns|tid|cpu|latency_ns|comm",
+            "SCHED|1000|500|101|0|500|vllm",
+            "SCHED|2000|1500|102|1|500|python3",
+            "SCHED|3000|2500|101|0|500|vllm",
+            "SCHED|4000|3500|103|2|500|kworker",
+            "STAT|matched|4",
+        ]
+        res = process_stream(io.StringIO("\n".join(lines) + "\n"), run_id="top-comm-test")
+        d = stats_to_dict(res)
+        self.assertEqual(d["distinct_tids_count"], 3)
+        self.assertEqual(d["top_comms"]["vllm"], 2)
+        self.assertEqual(d["top_comms"]["python3"], 1)
+        self.assertEqual(d["top_comms"]["kworker"], 1)
+
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
