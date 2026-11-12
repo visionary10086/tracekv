@@ -1,0 +1,26 @@
+name: Linux unit tests
+
+on:
+  push:
+    branches:
+      - main
+      - integrate/dager-collector
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install MVP test dependencies
+        run: python -m pip install -r requirements-mvp.in
+      - name: Run unit tests without GPU
+        run: python -m unittest discover -s tests -q
