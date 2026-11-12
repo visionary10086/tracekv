@@ -745,6 +745,7 @@ def analyze_kv_pcie_transfers(
     avg_rx_mb_s = round(sum([s[2] for s in gpu_pcie_samples]) / len(gpu_pcie_samples), 2) if gpu_pcie_samples else 0.0
 
     peak_throughput_mb_s = max(peak_tx_mb_s, peak_rx_mb_s)
+    has_pcie_data = any(s[1] > 0.0 or s[2] > 0.0 for s in gpu_pcie_samples)
     bus_saturation_pct = round(
         (peak_throughput_mb_s / pcie_theoretical_bandwidth_mb_per_s) * 100.0, 2
     ) if pcie_theoretical_bandwidth_mb_per_s > 0 else 0.0
@@ -757,12 +758,16 @@ def analyze_kv_pcie_transfers(
     if bus_saturation_pct >= 75.0:
         bottleneck = "PCIE_BUS_SATURATION"
         diagnostic = f"PCIe bus saturated ({bus_saturation_pct}% of theoretical link capacity). KV transfer rate bounded by physical interconnect."
+    elif not has_pcie_data:
+        # No NVML PCIe data - cannot distinguish PCIe saturation from scheduling stall
+        bottleneck = "NO_PCIE_TELEMETRY"
+        diagnostic = "NVML PCIe telemetry unavailable (nvidia-smi backend or legacy samples). Cannot distinguish PCIe saturation from host scheduling stall. Use --no-nvml=false to enable NVML for physical throughput measurement."
     elif (elapsed_p95 is not None and elapsed_p95 >= 10.0) and bus_saturation_pct < 25.0:
         bottleneck = "HOST_QUEUE_OR_SCHEDULING_STALL"
-        diagnostic = f"KV transfer latency high (P95={elapsed_p95}ms) but physical PCIe saturation is low ({bus_saturation_pct}%). Delay was dominated by host thread dispatch, polling, or CPU scheduling."
+        diagnostic = f"KV transfer latency high (P95={elapsed_p95}ms) but physical PCIe saturation is low ({bus_saturation_pct}%). Delay dominated by host thread dispatch, polling, or CPU scheduler latency."
     else:
         bottleneck = "BALANCED_TRANSFER"
-        diagnostic = f"KV transfers operating normally with {bus_saturation_pct}% peak PCIe utilization."
+        diagnostic = f"KV transfers operating normally with {bus_saturation_pct:.1f}% peak PCIe utilization."
 
     return {
         "available": True,

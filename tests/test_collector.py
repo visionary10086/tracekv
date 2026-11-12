@@ -1298,6 +1298,26 @@ class TestV02Integration(unittest.TestCase):
             self.assertEqual(res["bottleneck"], "PCIE_BUS_SATURATION")
             self.assertGreater(res["pcie_physical"]["bus_saturation_pct"], 75.0)
 
+            # --- NO_PCIE_TELEMETRY: legacy nvidia-smi samples without pcie fields ---
+            gpu_file_legacy = base / "gpu_legacy.jsonl"
+            gpu_file_legacy.write_text(
+                json.dumps({
+                    "timestamp": "2026-11-12T10:00:01Z",
+                    "memory_used_mb": 4000.0,
+                    "source": "nvidia-smi",
+                }) + "\n"
+            )
+            res_legacy = analyze_kv_pcie_transfers(
+                kv_transfers_path=kv_file,
+                gpu_samples_path=gpu_file_legacy,
+            )
+            self.assertEqual(
+                res_legacy["bottleneck"], "NO_PCIE_TELEMETRY",
+                "Legacy nvidia-smi samples without PCIe fields must yield NO_PCIE_TELEMETRY",
+            )
+            self.assertFalse(res_legacy.get("pcie_physical", {}).get("bus_saturation_pct", -1) > 0,
+                             "No saturation data should be present for legacy samples")
+
     def test_diagnose_system_bottlenecks(self):
         """Verify automated bottleneck attribution across scheduling, PCIe and memory."""
         from collector.correlator import diagnose_system_bottlenecks
