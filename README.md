@@ -11,7 +11,7 @@
 
 ## MVP v0.1 联调接口
 
-已提供统一快照、Linux `/proc` 可用内存采样、vLLM `/metrics` 的 KV 窗口指标适配、演示规则和 FastAPI 两个接口。协议与各成员交接字段见 [接口文档](docs/interfaces.md)；[模拟快照](contracts/sample_snapshot.json)只用于接口测试。
+已提供统一快照、Linux `/proc` 可用内存采样、vLLM `/metrics` 的 KV 窗口指标适配、演示规则和 FastAPI 两个接口。当前可运行接口见 [MVP v0.1 接口文档](docs/interfaces.md)；下一轮三人联调的数据、目录、时间和验收约定见 [联调接口规范 v0.2](docs/联调接口规范_v0.2.md)（实施协议，部分接口尚未实现）。[模拟快照](contracts/sample_snapshot.json)只用于接口测试。
 
 ```bash
 python -m pip install -r requirements-mvp.in
