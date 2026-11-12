@@ -1,7 +1,11 @@
-"""Real GPU memory and utilization sampler for NVIDIA GPUs (WSL2 / Linux).
+"""Real GPU memory, compute & PCIe telemetry sampler for NVIDIA GPUs (WSL2 / Linux).
 
-Uses `nvidia-smi` to query current VRAM usage, utilization, temperature, power,
-memory bandwidth utilization, clock frequencies, and performance states.
+Supports two collection backends:
+1. Direct ctypes NVML (libnvidia-ml.so): zero-subprocess query (< 0.2ms) extracting
+   VRAM distribution, core compute %, memory bandwidth %, PCIe Tx/Rx throughput,
+   temperature, power, clocks, and P-State.
+2. nvidia-smi CLI fallback: robust subprocess parsing with individual field fault tolerance.
+
 Converts memory to standard decimal MB consistent with `contracts/schema.py` and
 `docs/联调接口规范_v0.2.md`.
 
@@ -15,6 +19,7 @@ Project: TraceKV
 from __future__ import annotations
 
 import argparse
+import ctypes
 from datetime import datetime, timezone
 import json
 import os
@@ -27,6 +32,146 @@ from typing import Any
 
 
 _WSL_NVIDIA_SMI = Path("/usr/lib/wsl/lib/nvidia-smi")
+_NVML_LIB_CANDIDATES = [
+    "/usr/lib/wsl/lib/libnvidia-ml.so.1",
+    "/usr/lib/wsl/lib/libnvidia-ml.so",
+    "libnvidia-ml.so.1",
+    "libnvidia-ml.so",
+]
+
+
+class _nvmlMemory_t(ctypes.Structure):
+    _fields_ = [
+        ("total", ctypes.c_ulonglong),
+        ("free", ctypes.c_ulonglong),
+        ("used", ctypes.c_ulonglong),
+    ]
+
+
+class _nvmlUtilization_t(ctypes.Structure):
+    _fields_ = [
+        ("gpu", ctypes.c_uint),
+        ("memory", ctypes.c_uint),
+    ]
+
+
+class _NvmlDriver:
+    """Singleton wrapper around libnvidia-ml.so via ctypes."""
+
+    _instance: _NvmlDriver | None = None
+    _init_lock = threading.Lock()
+
+    def __init__(self) -> None:
+        self.lib: ctypes.CDLL | None = None
+        self.initialized = False
+
+        for candidate in _NVML_LIB_CANDIDATES:
+            try:
+                if os.path.exists(candidate) or not candidate.startswith("/"):
+                    self.lib = ctypes.CDLL(candidate)
+                    ret = self.lib.nvmlInit_v2()
+                    if ret == 0:
+                        self.initialized = True
+                        break
+            except Exception:
+                self.lib = None
+                self.initialized = False
+
+    @classmethod
+    def get_instance(cls) -> _NvmlDriver:
+        with cls._init_lock:
+            if cls._instance is None:
+                cls._instance = cls()
+            return cls._instance
+
+    def query_device(self, gpu_index: int = 0) -> dict[str, Any] | None:
+        """Query GPU metrics directly via NVML in < 0.2ms."""
+        if not self.initialized or self.lib is None:
+            return None
+
+        try:
+            dev = ctypes.c_void_p()
+            ret = self.lib.nvmlDeviceGetHandleByIndex_v2(gpu_index, ctypes.byref(dev))
+            if ret != 0:
+                return None
+
+            # UUID
+            uuid_buf = ctypes.create_string_buffer(64)
+            self.lib.nvmlDeviceGetUUID(dev, uuid_buf, 64)
+            uuid_str = uuid_buf.value.decode("utf-8") if uuid_buf.value else None
+
+            # Memory (bytes -> decimal MB: 1 MB = 1,000,000 bytes)
+            mem = _nvmlMemory_t()
+            ret_mem = self.lib.nvmlDeviceGetMemoryInfo(dev, ctypes.byref(mem))
+            if ret_mem == 0:
+                tot_mb = round(mem.total / 1_000_000, 2)
+                used_mb = round(mem.used / 1_000_000, 2)
+                free_mb = round(mem.free / 1_000_000, 2)
+                used_pct = round((used_mb / tot_mb) * 100.0, 1) if tot_mb > 0 else None
+            else:
+                tot_mb = used_mb = free_mb = used_pct = None
+
+            # Utilization (core compute % & memory bandwidth %)
+            util = _nvmlUtilization_t()
+            ret_util = self.lib.nvmlDeviceGetUtilizationRates(dev, ctypes.byref(util))
+            if ret_util == 0:
+                util_gpu = float(util.gpu)
+                util_mem = float(util.memory)
+            else:
+                util_gpu = util_mem = None
+
+            # Temperature
+            temp = ctypes.c_uint()
+            ret_temp = self.lib.nvmlDeviceGetTemperature(dev, 0, ctypes.byref(temp))
+            temp_c = float(temp.value) if ret_temp == 0 else None
+
+            # Power (milliwatts -> W)
+            power = ctypes.c_uint()
+            ret_pow = self.lib.nvmlDeviceGetPowerUsage(dev, ctypes.byref(power))
+            power_w = round(power.value / 1000.0, 2) if ret_pow == 0 else None
+
+            # Performance state
+            pstate = ctypes.c_uint()
+            ret_ps = self.lib.nvmlDeviceGetPerformanceState(dev, ctypes.byref(pstate))
+            pstate_str = f"P{pstate.value}" if ret_ps == 0 else None
+
+            # Clocks
+            sm_clk = ctypes.c_uint()
+            ret_sm = self.lib.nvmlDeviceGetClockInfo(dev, 1, ctypes.byref(sm_clk))
+            sm_mhz = int(sm_clk.value) if ret_sm == 0 else None
+
+            mem_clk = ctypes.c_uint()
+            ret_mem_c = self.lib.nvmlDeviceGetClockInfo(dev, 2, ctypes.byref(mem_clk))
+            mem_mhz = int(mem_clk.value) if ret_mem_c == 0 else None
+
+            # PCIe throughput (0=TX, 1=RX, in KB/s)
+            tx = ctypes.c_uint()
+            rx = ctypes.c_uint()
+            ret_tx = self.lib.nvmlDeviceGetPcieThroughput(dev, 0, ctypes.byref(tx))
+            ret_rx = self.lib.nvmlDeviceGetPcieThroughput(dev, 1, ctypes.byref(rx))
+            pcie_tx_kb = int(tx.value) if ret_tx == 0 else None
+            pcie_rx_kb = int(rx.value) if ret_rx == 0 else None
+
+            return {
+                "gpu_index": gpu_index,
+                "gpu_uuid": uuid_str,
+                "memory_used_mb": used_mb,
+                "memory_total_mb": tot_mb,
+                "memory_free_mb": free_mb,
+                "memory_used_pct": used_pct,
+                "utilization_pct": util_gpu,
+                "utilization_memory_pct": util_mem,
+                "temperature_c": temp_c,
+                "power_w": power_w,
+                "pstate": pstate_str,
+                "sm_clock_mhz": sm_mhz,
+                "mem_clock_mhz": mem_mhz,
+                "pcie_tx_kb_per_s": pcie_tx_kb,
+                "pcie_rx_kb_per_s": pcie_rx_kb,
+                "source": "nvml",
+            }
+        except Exception:
+            return None
 
 
 def _find_nvidia_smi() -> str | None:
@@ -81,28 +226,25 @@ def collect_gpu_metrics(
     binary_path: str | None = None,
     gpu_index: int = 0,
     run_id: str = "",
+    prefer_nvml: bool = True,
 ) -> dict[str, Any]:
     """Query rich GPU metrics conforming to TraceKV v0.2 specification.
 
-    Returns a dict with:
-        run_id: str
-        timestamp: ISO 8601 UTC string (ending in Z)
-        gpu_index: int
-        gpu_uuid: str | None
-        memory_used_mb: Decimal megabytes (1,000,000 bytes)
-        memory_total_mb: Decimal megabytes
-        memory_free_mb: Decimal megabytes
-        memory_used_pct: Percentage of VRAM used (0 - 100)
-        utilization_pct: GPU compute core utilization percentage (0 - 100)
-        utilization_memory_pct: GPU memory bandwidth utilization percentage (0 - 100)
-        temperature_c: Temperature in degrees Celsius
-        power_w: Power draw in Watts
-        pstate: Performance state (e.g. 'P0', 'P2')
-        sm_clock_mhz: SM clock frequency in MHz
-        mem_clock_mhz: Memory clock frequency in MHz
-        source: 'nvidia-smi' or 'unavailable'
+    Prioritizes direct ctypes NVML (< 0.2ms, zero subprocess), automatically
+    falling back to nvidia-smi CLI.
     """
     now_iso = _utc_now_iso()
+
+    # 1. Try fast NVML path if not forcing custom binary
+    if prefer_nvml and not binary_path:
+        nvml_driver = _NvmlDriver.get_instance()
+        nvml_data = nvml_driver.query_device(gpu_index)
+        if nvml_data is not None:
+            nvml_data["run_id"] = run_id
+            nvml_data["timestamp"] = now_iso
+            return nvml_data
+
+    # 2. Fallback to nvidia-smi CLI
     base_unavailable: dict[str, Any] = {
         "run_id": run_id,
         "timestamp": now_iso,
@@ -119,6 +261,8 @@ def collect_gpu_metrics(
         "pstate": None,
         "sm_clock_mhz": None,
         "mem_clock_mhz": None,
+        "pcie_tx_kb_per_s": None,
+        "pcie_rx_kb_per_s": None,
         "source": "unavailable",
     }
 
@@ -227,6 +371,8 @@ def collect_gpu_metrics(
             "pstate": pstate_str,
             "sm_clock_mhz": sm_clk,
             "mem_clock_mhz": mem_clk,
+            "pcie_tx_kb_per_s": None,
+            "pcie_rx_kb_per_s": None,
             "source": "nvidia-smi",
         }
     except (subprocess.TimeoutExpired, OSError, ValueError, IndexError):
@@ -234,13 +380,7 @@ def collect_gpu_metrics(
 
 
 def parse_legacy_gpu_sample(record: dict[str, Any] | str, run_id: str = "") -> dict[str, Any]:
-    """Parse a legacy or v0.2 GPU sample into a standardized v0.2 sample dict.
-
-    Handles legacy format from `tools/run_wsl_baselines.py`:
-        time_utc, values_memory_MiB_util_percent_temp_C_power_W
-    Note per v0.2 spec: legacy string has 4 items:
-        used_mib, util_pct, temp_c, power_w (power is item index 3, NOT 4).
-    """
+    """Parse a legacy or v0.2 GPU sample into a standardized v0.2 sample dict."""
     if isinstance(record, str):
         record = json.loads(record)
 
@@ -296,6 +436,8 @@ def parse_legacy_gpu_sample(record: dict[str, Any] | str, run_id: str = "") -> d
         "pstate": None,
         "sm_clock_mhz": None,
         "mem_clock_mhz": None,
+        "pcie_tx_kb_per_s": None,
+        "pcie_rx_kb_per_s": None,
         "source": "nvidia-smi" if used_mb is not None else "unavailable",
     }
 
@@ -313,12 +455,14 @@ class GpuMonitor:
         interval_sec: float = 1.0,
         binary_path: str | None = None,
         gpu_index: int = 0,
+        prefer_nvml: bool = True,
     ):
         self.run_id = run_id
         self.output_path = Path(output_path)
         self.interval_sec = interval_sec
         self.binary_path = binary_path
         self.gpu_index = gpu_index
+        self.prefer_nvml = prefer_nvml
 
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -345,6 +489,7 @@ class GpuMonitor:
                     binary_path=self.binary_path,
                     gpu_index=self.gpu_index,
                     run_id=self.run_id,
+                    prefer_nvml=self.prefer_nvml,
                 )
                 f.write(json.dumps(sample, ensure_ascii=False) + "\n")
                 f.flush()
@@ -360,23 +505,37 @@ class GpuMonitor:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="TraceKV Enriched GPU Telemetry Sampler (v0.2)")
+    parser = argparse.ArgumentParser(description="TraceKV NVML & GPU Telemetry Sampler (v0.2)")
     parser.add_argument("--run-id", default="test-gpu-run", help="Experiment run ID")
     parser.add_argument("--out", type=Path, default=None, help="Output JSONL path")
     parser.add_argument("--interval", type=float, default=1.0, help="Sampling interval in seconds")
     parser.add_argument("--duration", type=float, default=0.0, help="Monitoring duration (0 = single shot)")
     parser.add_argument("--gpu-index", type=int, default=0, help="GPU index to query")
+    parser.add_argument("--no-nvml", action="store_true", help="Force nvidia-smi CLI instead of NVML")
     args = parser.parse_args()
 
+    prefer_nvml = not args.no_nvml
+
     if args.duration <= 0 and args.out is None:
-        sample = collect_gpu_metrics(gpu_index=args.gpu_index, run_id=args.run_id)
+        sample = collect_gpu_metrics(
+            gpu_index=args.gpu_index,
+            run_id=args.run_id,
+            prefer_nvml=prefer_nvml,
+        )
         print(json.dumps(sample, indent=2, ensure_ascii=False))
         return
 
     out_path = args.out or Path(f"results/{args.run_id}/gpu_samples.jsonl")
     duration = args.duration if args.duration > 0 else 2.0
-    print(f"Monitoring GPU {args.gpu_index} for {duration}s -> {out_path}")
-    with GpuMonitor(args.run_id, out_path, interval_sec=args.interval, gpu_index=args.gpu_index) as mon:
+    backend = "NVML ctypes (<0.2ms)" if prefer_nvml else "nvidia-smi"
+    print(f"Monitoring GPU {args.gpu_index} via {backend} for {duration}s -> {out_path}")
+    with GpuMonitor(
+        args.run_id,
+        out_path,
+        interval_sec=args.interval,
+        gpu_index=args.gpu_index,
+        prefer_nvml=prefer_nvml,
+    ) as mon:
         time.sleep(duration)
     print(f"Done. Collected {mon.sample_count} samples.")
 

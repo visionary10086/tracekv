@@ -226,6 +226,26 @@ class TestEventToJsonl(unittest.TestCase):
         # Must be valid JSON
         json.loads(line)
 
+    def test_target_filtering_fields(self):
+        ev = SchedEvent(200, 100, 42, 0, 100, "vllm")
+        # Target PID match
+        line1 = event_to_jsonl(ev, "r", target_pids=[42])
+        d1 = json.loads(line1)
+        self.assertTrue(d1["is_target"])
+        self.assertEqual(d1["pid"], 42)
+
+        # Target PID mismatch
+        line2 = event_to_jsonl(ev, "r", target_pids=[99])
+        d2 = json.loads(line2)
+        self.assertFalse(d2["is_target"])
+        self.assertIsNone(d2["pid"])
+
+        # Target comm match
+        line3 = event_to_jsonl(ev, "r", target_comm="vllm")
+        d3 = json.loads(line3)
+        self.assertTrue(d3["is_target"])
+        self.assertEqual(d3["pid"], 42)
+
 
 # ===========================================================================
 # Stream processing tests
@@ -346,6 +366,61 @@ class TestProcessStream(unittest.TestCase):
         # End should be >= start
         self.assertGreaterEqual(result.end_anchor.monotonic_ns,
                                 result.start_anchor.monotonic_ns)
+
+    def test_target_pid_filtering(self):
+        lines = [
+            make_line(200, 100, 10, 0, 1000, "bg_worker"),
+            make_line(400, 200, 20, 1, 2000, "vllm_engine"),
+            make_line(800, 400, 20, 1, 4000, "vllm_engine"),
+        ]
+        output = io.StringIO()
+        res = process_stream(
+            make_stream(lines),
+            "pid-filter-run",
+            output=output,
+            target_pids=[20],
+        )
+        self.assertEqual(res.scope, "target_process")
+        self.assertEqual(res.target_pids, [20])
+        # System stats include all 3 events
+        self.assertEqual(res.stats.event_count, 3)
+        # Target stats only isolate pid 20 (2 events)
+        self.assertIsNotNone(res.target_stats)
+        self.assertEqual(res.target_stats.event_count, 2)
+        self.assertEqual(res.target_stats.min_ns, 2000)
+        self.assertEqual(res.target_stats.max_ns, 4000)
+        self.assertEqual(res.target_stats.mean_ns, 3000.0)
+
+        # Verify JSONL lines
+        output.seek(0)
+        json_lines = [json.loads(l) for l in output.read().strip().split("\n")]
+        self.assertFalse(json_lines[0]["is_target"])
+        self.assertTrue(json_lines[1]["is_target"])
+        self.assertTrue(json_lines[2]["is_target"])
+
+        # Verify stats_to_dict
+        d = stats_to_dict(res)
+        self.assertEqual(d["scope"], "target_process")
+        self.assertEqual(d["target_pids"], [20])
+        self.assertEqual(d["event_count"], 2)
+        self.assertEqual(d["mean_ns"], 3000.0)
+        self.assertEqual(d["system_baseline"]["event_count"], 3)
+
+    def test_target_comm_filtering(self):
+        lines = [
+            make_line(200, 100, 10, 0, 1000, "bg_worker"),
+            make_line(400, 200, 20, 1, 2000, "vllm_engine"),
+        ]
+        res = process_stream(
+            make_stream(lines),
+            "comm-filter-run",
+            target_comm="vllm_engine",
+        )
+        self.assertEqual(res.scope, "target_process")
+        self.assertEqual(res.target_comm, "vllm_engine")
+        self.assertEqual(res.stats.event_count, 2)
+        self.assertEqual(res.target_stats.event_count, 1)
+        self.assertEqual(res.target_stats.min_ns, 2000)
 
 
 # ===========================================================================
@@ -633,6 +708,24 @@ class TestCLI(unittest.TestCase):
             _, kwargs = mock_run.call_args
             self.assertEqual(str(kwargs["kernel_source"]), "/tmp/ksrc")
             self.assertEqual(str(kwargs["kernel_build"]), "/tmp/kbld")
+
+    def test_cli_target_filter_args(self):
+        """CLI arguments for target PID and comm filtering are accepted."""
+        from unittest.mock import patch
+        from collector.cpu_scheduler import main, CollectorResult, TimeAnchor
+        dummy_result = CollectorResult(
+            run_id="test-cli-filter",
+            start_anchor=TimeAnchor(wall_ns=1, monotonic_ns=2),
+            end_anchor=TimeAnchor(wall_ns=3, monotonic_ns=4),
+        )
+        with patch("collector.cpu_scheduler.run_collector", return_value=dummy_result) as mock_run:
+            with patch("sys.stderr"), patch("builtins.print"):
+                exit_code = main(["--pid", "12345", "--comm", "vllm_engine"])
+            self.assertEqual(exit_code, 0)
+            mock_run.assert_called_once()
+            _, kwargs = mock_run.call_args
+            self.assertEqual(kwargs["target_pid"], 12345)
+            self.assertEqual(kwargs["target_comm"], "vllm_engine")
 
     def test_workload_lifecycle(self):
         """Synthetic workload runs and stops cleanly."""
@@ -1064,6 +1157,29 @@ class TestV02Integration(unittest.TestCase):
         self.assertEqual(d["top_comms"]["vllm"], 2)
         self.assertEqual(d["top_comms"]["python3"], 1)
         self.assertEqual(d["top_comms"]["kworker"], 1)
+
+    def test_nvml_direct_driver_query(self):
+        """Verify direct ctypes NVML driver query and CLI fallback."""
+        from collector.gpu import _NvmlDriver, collect_gpu_metrics
+        driver = _NvmlDriver.get_instance()
+        if driver.initialized:
+            sample = collect_gpu_metrics(run_id="nvml-test", prefer_nvml=True)
+            self.assertEqual(sample["source"], "nvml")
+            self.assertIsNotNone(sample["memory_used_mb"])
+            self.assertIsNotNone(sample["memory_total_mb"])
+            self.assertIn("pcie_tx_kb_per_s", sample)
+            self.assertIn("pcie_rx_kb_per_s", sample)
+
+        mock_output = "0, GPU-fallback, 2000, 8000, 6000, 10, 5, 40.0, 30.0, P0, 1500, 7000\n"
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=mock_output)
+            sample_cli = collect_gpu_metrics(
+                run_id="cli-fallback",
+                prefer_nvml=False,
+                binary_path="/mock/nvidia-smi",
+            )
+            self.assertEqual(sample_cli["source"], "nvidia-smi")
+            self.assertEqual(sample_cli["gpu_uuid"], "GPU-fallback")
 
 
 

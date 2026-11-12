@@ -100,6 +100,8 @@ class CollectorResult:
     kernel_build: str | None = None
     scope: str = "system"
     target_pids: list[int] | None = None
+    target_comm: str | None = None
+    target_stats: CollectorStats | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -204,9 +206,30 @@ def compute_stats(latencies_ns: list[int]) -> CollectorStats:
 # JSONL formatting
 # ---------------------------------------------------------------------------
 
-def event_to_jsonl(event: SchedEvent, run_id: str) -> str:
+def event_to_jsonl(
+    event: SchedEvent,
+    run_id: str,
+    target_pids: list[int] | None = None,
+    target_comm: str | None = None,
+) -> str:
     """Serialize one event to a JSON line (no trailing newline)."""
-    return json.dumps({
+    pid_val: int | None = None
+    is_target: bool | None = None
+
+    if target_pids is not None:
+        if event.tid in target_pids:
+            is_target = True
+            pid_val = event.tid
+        else:
+            is_target = False
+    elif target_comm is not None:
+        if event.comm == target_comm:
+            is_target = True
+            pid_val = event.tid
+        else:
+            is_target = False
+
+    payload = {
         "schema_version": 1,
         "run_id": run_id,
         "source": "ebpf_sched",
@@ -214,14 +237,17 @@ def event_to_jsonl(event: SchedEvent, run_id: str) -> str:
         "clock": "monotonic",
         "timestamp_ns": event.switch_ns,
         "wakeup_timestamp_ns": event.wakeup_ns,
-        "pid": None,
+        "pid": pid_val,
         "tid": event.tid,
         "comm": event.comm,
         "cpu": event.cpu,
         "request_id": None,
         "value": event.latency_ns,
         "unit": "ns",
-    }, ensure_ascii=False)
+    }
+    if is_target is not None:
+        payload["is_target"] = is_target
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def stats_to_dict(result: CollectorResult) -> dict:
@@ -264,6 +290,26 @@ def stats_to_dict(result: CollectorResult) -> dict:
     }
     if result.target_pids is not None:
         d["target_pids"] = result.target_pids
+    if result.target_comm is not None:
+        d["target_comm"] = result.target_comm
+    if result.scope == "target_process" and result.target_stats is not None:
+        ts = result.target_stats
+        d["event_count"] = ts.event_count
+        d["min_ns"] = ts.min_ns
+        d["max_ns"] = ts.max_ns
+        d["mean_ns"] = round(ts.mean_ns, 2) if ts.mean_ns is not None else None
+        d["p50_ns"] = ts.p50_ns
+        d["p95_ns"] = ts.p95_ns
+        d["p99_ns"] = ts.p99_ns
+        d["distinct_tids_count"] = ts.distinct_tids_count
+        d["system_baseline"] = {
+            "event_count": s.event_count,
+            "p50_ns": s.p50_ns,
+            "p95_ns": s.p95_ns,
+            "p99_ns": s.p99_ns,
+            "mean_ns": round(s.mean_ns, 2) if s.mean_ns is not None else None,
+            "top_comms": s.top_comms,
+        }
     if result.end_anchor is not None:
         d["end_wall_ns"] = result.end_anchor.wall_ns
         d["end_monotonic_ns"] = result.end_anchor.monotonic_ns
@@ -280,6 +326,8 @@ def process_stream(
     output: TextIO | None = None,
     max_samples: int = DEFAULT_MAX_SAMPLES,
     random_seed: int | None = 42,
+    target_pids: list[int] | None = None,
+    target_comm: str | None = None,
 ) -> CollectorResult:
     """Read lines from *stream*, parse events, optionally write JSONL to *output*.
 
@@ -287,16 +335,31 @@ def process_stream(
     sampling for memory-bounded percentile computation (at most *max_samples*
     stored in memory).
 
+    Supports target process isolation (`target_pids` or `target_comm`):
+    records per-process scheduler metrics alongside system-wide background baseline.
+
     Returns a :class:`CollectorResult` with computed statistics.  This
     function does **not** launch bpftrace — it only processes an already-open
     text stream, making it easy to test with synthetic data.
     """
     anchor = TimeAnchor(wall_ns=time.time_ns(), monotonic_ns=time.monotonic_ns())
-    result = CollectorResult(run_id=run_id, start_anchor=anchor)
+    scope = "target_process" if (target_pids is not None or target_comm is not None) else "system"
+    result = CollectorResult(
+        run_id=run_id,
+        start_anchor=anchor,
+        scope=scope,
+        target_pids=target_pids,
+        target_comm=target_comm,
+    )
     sample_reservoir: list[int] = []
+    target_reservoir: list[int] = []
+    target_stats = CollectorStats() if scope == "target_process" else None
+    target_seen_tids: set[int] = set()
+
     rng = random.Random(random_seed) if random_seed is not None else random.Random()
     seen_tids: set[int] = set()
     comm_counts: dict[str, int] = {}
+    target_pids_set = set(target_pids) if target_pids is not None else None
 
     for raw_line in stream:
         line = raw_line.rstrip("\n").rstrip("\r")
@@ -325,7 +388,7 @@ def process_stream(
                 result.stats.parser_error_count += 1
                 continue
 
-            # Exact online streaming aggregations
+            # Exact online streaming aggregations (system-wide)
             result.stats.event_count += 1
             result.stats.sum_ns += event.latency_ns
             seen_tids.add(event.tid)
@@ -335,7 +398,7 @@ def process_stream(
             if result.stats.max_ns is None or event.latency_ns > result.stats.max_ns:
                 result.stats.max_ns = event.latency_ns
 
-            # Reservoir sampling: bounded memory for percentiles
+            # System reservoir sampling: bounded memory for percentiles
             if len(sample_reservoir) < max_samples:
                 sample_reservoir.append(event.latency_ns)
             else:
@@ -343,14 +406,44 @@ def process_stream(
                 if j < max_samples:
                     sample_reservoir[j] = event.latency_ns
 
+            # Target process filtering
+            is_target = False
+            if target_pids_set is not None and event.tid in target_pids_set:
+                is_target = True
+            elif target_comm is not None and event.comm == target_comm:
+                is_target = True
+
+            if is_target and target_stats is not None:
+                target_stats.event_count += 1
+                target_stats.sum_ns += event.latency_ns
+                target_seen_tids.add(event.tid)
+                if target_stats.min_ns is None or event.latency_ns < target_stats.min_ns:
+                    target_stats.min_ns = event.latency_ns
+                if target_stats.max_ns is None or event.latency_ns > target_stats.max_ns:
+                    target_stats.max_ns = event.latency_ns
+
+                if len(target_reservoir) < max_samples:
+                    target_reservoir.append(event.latency_ns)
+                else:
+                    k = rng.randint(0, target_stats.event_count - 1)
+                    if k < max_samples:
+                        target_reservoir[k] = event.latency_ns
+
             if output is not None:
-                output.write(event_to_jsonl(event, run_id) + "\n")
+                output.write(
+                    event_to_jsonl(
+                        event,
+                        run_id,
+                        target_pids=target_pids,
+                        target_comm=target_comm,
+                    ) + "\n"
+                )
             continue
 
         # Unknown line — could be bpftrace warning; count as parse error
         result.stats.parser_error_count += 1
 
-    # Finalize summary statistics
+    # Finalize summary statistics (system-wide)
     result.stats.distinct_tids_count = len(seen_tids)
     sorted_comms = sorted(comm_counts.items(), key=lambda x: x[1], reverse=True)[:10]
     result.stats.top_comms = dict(sorted_comms)
@@ -362,6 +455,18 @@ def process_stream(
             result.stats.p50_ns = percentile(sample_reservoir, 50)
             result.stats.p95_ns = percentile(sample_reservoir, 95)
             result.stats.p99_ns = percentile(sample_reservoir, 99)
+
+    # Finalize target summary statistics
+    if target_stats is not None:
+        target_stats.distinct_tids_count = len(target_seen_tids)
+        if target_stats.event_count > 0:
+            target_stats.mean_ns = target_stats.sum_ns / target_stats.event_count
+            if target_reservoir:
+                target_reservoir.sort()
+                target_stats.p50_ns = percentile(target_reservoir, 50)
+                target_stats.p95_ns = percentile(target_reservoir, 95)
+                target_stats.p99_ns = percentile(target_reservoir, 99)
+        result.target_stats = target_stats
 
     # Reconcile kernel matched count vs user-space received events
     if result.stats.kernel_matched_count is not None:
@@ -436,6 +541,9 @@ def run_collector(
     perf_rb_pages: int = DEFAULT_PERF_RB_PAGES,
     kernel_source: Path | str | None = None,
     kernel_build: Path | str | None = None,
+    target_pid: int | None = None,
+    target_pids: list[int] | None = None,
+    target_comm: str | None = None,
 ) -> CollectorResult:
     """Launch bpftrace and collect scheduler latency events in real-time.
 
@@ -466,12 +574,21 @@ def run_collector(
         Override BPFTRACE_KERNEL_SOURCE directory.
     kernel_build:
         Override BPFTRACE_KERNEL_BUILD directory.
+    target_pid:
+        Single target PID to filter (sets scope="target_process").
+    target_pids:
+        List of target PIDs to filter (sets scope="target_process").
+    target_comm:
+        Target process command name to filter (sets scope="target_process").
 
     Returns
     -------
     CollectorResult
         Includes statistics, time anchors and subprocess exit code.
     """
+    if target_pid is not None and target_pids is None:
+        target_pids = [target_pid]
+
     bt = bpftrace_bin or _find_bpftrace()
     if bt is None:
         anchor = TimeAnchor(wall_ns=time.time_ns(), monotonic_ns=time.monotonic_ns())
@@ -480,6 +597,9 @@ def run_collector(
             start_anchor=anchor,
             end_anchor=anchor,
             error="bpftrace not found in PATH",
+            scope="target_process" if (target_pids or target_comm) else "system",
+            target_pids=target_pids,
+            target_comm=target_comm,
         )
 
     script = str(script_path or _SCRIPT_PATH)
@@ -508,11 +628,15 @@ def run_collector(
         env["BPFTRACE_KERNEL_BUILD"] = str(resolved_build)
 
     anchor = TimeAnchor(wall_ns=time.time_ns(), monotonic_ns=time.monotonic_ns())
+    scope = "target_process" if (target_pids or target_comm) else "system"
     result = CollectorResult(
         run_id=run_id,
         start_anchor=anchor,
         kernel_source=env.get("BPFTRACE_KERNEL_SOURCE"),
         kernel_build=env.get("BPFTRACE_KERNEL_BUILD"),
+        scope=scope,
+        target_pids=target_pids,
+        target_comm=target_comm,
     )
     output_file: TextIO | None = None
 
@@ -595,16 +719,30 @@ def run_collector(
         assert proc.stdout is not None
         try:
             stream_result = process_stream(
-                proc.stdout, run_id, output=output_file, max_samples=max_samples
+                proc.stdout,
+                run_id,
+                output=output_file,
+                max_samples=max_samples,
+                target_pids=target_pids,
+                target_comm=target_comm,
             )
         except KeyboardInterrupt:
             _send_sigint()
             stream_result = process_stream(
-                proc.stdout, run_id, output=output_file, max_samples=max_samples
+                proc.stdout,
+                run_id,
+                output=output_file,
+                max_samples=max_samples,
+                target_pids=target_pids,
+                target_comm=target_comm,
             )
 
         # Merge results
         result.stats = stream_result.stats
+        result.target_stats = stream_result.target_stats
+        result.scope = stream_result.scope
+        result.target_pids = stream_result.target_pids
+        result.target_comm = stream_result.target_comm
         result.end_anchor = stream_result.end_anchor
 
         try:
@@ -673,6 +811,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="Override BPFTRACE_KERNEL_SOURCE directory")
     parser.add_argument("--kernel-build", type=Path, default=None,
                         help="Override BPFTRACE_KERNEL_BUILD directory")
+    parser.add_argument("--pid", type=int, default=None,
+                        help="Target process PID to isolate scheduler latency")
+    parser.add_argument("--comm", type=str, default=None,
+                        help="Target process command name (comm) to isolate scheduler latency")
     args = parser.parse_args(argv)
 
     print(f"Starting scheduler latency collector (run_id={args.run_id}, duration={args.duration}s)",
@@ -685,6 +827,8 @@ def main(argv: list[str] | None = None) -> int:
         max_samples=args.max_samples,
         kernel_source=args.kernel_source,
         kernel_build=args.kernel_build,
+        target_pid=args.pid,
+        target_comm=args.comm,
     )
 
     summary = stats_to_dict(result)
