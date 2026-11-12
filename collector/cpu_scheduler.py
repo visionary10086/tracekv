@@ -96,6 +96,8 @@ class CollectorResult:
     error: str | None = None
     kernel_source: str | None = None
     kernel_build: str | None = None
+    scope: str = "system"
+    target_pids: list[int] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -221,12 +223,20 @@ def event_to_jsonl(event: SchedEvent, run_id: str) -> str:
 
 
 def stats_to_dict(result: CollectorResult) -> dict:
-    """Build a serializable summary dictionary."""
+    """Build a serializable summary dictionary conforming to v0.2 contract.
+
+    Notes on metric semantics per docs/联调接口规范_v0.2.md:
+    - scope: "system" for unconstrained tracing, "target_process" if filtered.
+    - unmatched_switch_count: switch-ins without observed wakeup event (unpartnered).
+    - dropped_events_count: reconciliation discrepancy between kernel matched count
+      and userspace parsed events.
+    """
     s = result.stats
     d: dict = {
         "schema_version": 1,
         "run_id": result.run_id,
         "source": "ebpf_sched",
+        "scope": result.scope,
         "metric": "wakeup_to_run_latency_summary",
         "start_wall_ns": result.start_anchor.wall_ns,
         "start_monotonic_ns": result.start_anchor.monotonic_ns,
@@ -248,6 +258,8 @@ def stats_to_dict(result: CollectorResult) -> dict:
         "bpftrace_exit_code": result.bpftrace_exit_code,
         "error": result.error,
     }
+    if result.target_pids is not None:
+        d["target_pids"] = result.target_pids
     if result.end_anchor is not None:
         d["end_wall_ns"] = result.end_anchor.wall_ns
         d["end_monotonic_ns"] = result.end_anchor.monotonic_ns

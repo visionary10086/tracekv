@@ -13,6 +13,7 @@ Project: TraceKV
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
 from uuid import uuid4
@@ -22,6 +23,17 @@ from collector.demo import collect_system_metrics
 from collector.gpu import collect_gpu_metrics
 from contracts.schema import validate_snapshot, utc_now
 from engine.vllm_adapter import VllmAdapter
+
+
+def _compute_window_start(end_iso: str, window_ms: int) -> str:
+    """Compute ISO 8601 UTC window start from end timestamp and window duration."""
+    try:
+        clean = end_iso.replace("Z", "+00:00")
+        end_dt = datetime.fromisoformat(clean)
+        start_dt = end_dt - timedelta(milliseconds=window_ms)
+        return start_dt.isoformat().replace("+00:00", "Z")
+    except Exception:
+        return end_iso
 
 
 def build_unified_snapshot(
@@ -114,6 +126,7 @@ def build_unified_snapshot(
         system_section["sched_preempt_count"] = unmatched
 
         sched_section = {
+            "scope": sched_summary.get("scope", "system"),
             "p50_us": p50_us,
             "p95_us": p95_us,
             "p99_us": p99_us,
@@ -124,10 +137,15 @@ def build_unified_snapshot(
         }
         sys_source = f"{sys_source}+ebpf_sched"
 
+    end_ts = sys_raw.get("timestamp") or utc_now()
+    start_ts = _compute_window_start(end_ts, eff_window_ms)
+
     snapshot: dict[str, Any] = {
         "schema_version": "0.1",
         "run_id": effective_run_id,
-        "timestamp": sys_raw.get("timestamp") or utc_now(),
+        "timestamp": end_ts,
+        "window_start_utc": start_ts,
+        "window_end_utc": end_ts,
         "window_ms": eff_window_ms,
         "system": system_section,
         "gpu": {"memory_used_mb": gpu_mem},

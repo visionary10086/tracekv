@@ -774,5 +774,199 @@ class TestCLI(unittest.TestCase):
             self.assertEqual(r, 1.0)
 
 
+class TestV02Integration(unittest.TestCase):
+    """Tests for TraceKV v0.2 integration contract adherence."""
+
+    def test_stats_to_dict_scope_and_anchors(self):
+        """Verify sched_summary.json includes scope: system and time anchors."""
+        anchor = TimeAnchor(wall_ns=1700000000000000000, monotonic_ns=100000000000)
+        res = CollectorResult(run_id="run-v02", start_anchor=anchor)
+        d = stats_to_dict(res)
+        self.assertEqual(d["scope"], "system")
+        self.assertEqual(d["start_wall_ns"], 1700000000000000000)
+        self.assertEqual(d["start_monotonic_ns"], 100000000000)
+
+        # Target process scope
+        res_target = CollectorResult(
+            run_id="run-target",
+            start_anchor=anchor,
+            scope="target_process",
+            target_pids=[1234, 5678],
+        )
+        d_target = stats_to_dict(res_target)
+        self.assertEqual(d_target["scope"], "target_process")
+        self.assertEqual(d_target["target_pids"], [1234, 5678])
+
+    def test_gpu_monitor_and_sample_parsing(self):
+        """Verify GPU parsing with 7 fields, [Not Supported] fields, and GpuMonitor."""
+        from collector.gpu import (
+            collect_gpu_metrics,
+            parse_legacy_gpu_sample,
+            GpuMonitor,
+        )
+
+        # 7-field mock with [Not Supported] power
+        mock_7 = "0, GPU-test-uuid, 2048, 8192, 75, 62.0, [Not Supported]\n"
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=mock_7)
+            res = collect_gpu_metrics(binary_path="/mock/smi", run_id="gpu-test")
+            self.assertEqual(res["gpu_index"], 0)
+            self.assertEqual(res["gpu_uuid"], "GPU-test-uuid")
+            # 2048 MiB = 2048 * 1024 * 1024 / 1_000_000 = 2147.48 MB
+            self.assertAlmostEqual(res["memory_used_mb"], 2147.48, places=1)
+            self.assertEqual(res["utilization_pct"], 75.0)
+            self.assertEqual(res["temperature_c"], 62.0)
+            self.assertIsNone(res["power_w"])
+            self.assertEqual(res["source"], "nvidia-smi")
+
+        # Legacy 4-item baseline parsing: used_mib, util_pct, temp_c, power_w
+        legacy_rec = {
+            "time_utc": "2026-11-12T10:00:00Z",
+            "values_memory_MiB_util_percent_temp_C_power_W": "1000, 50, 45, 80.5",
+        }
+        parsed_legacy = parse_legacy_gpu_sample(legacy_rec, run_id="leg-run")
+        self.assertEqual(parsed_legacy["run_id"], "leg-run")
+        self.assertEqual(parsed_legacy["power_w"], 80.5)
+        self.assertEqual(parsed_legacy["temperature_c"], 45.0)
+        self.assertEqual(parsed_legacy["utilization_pct"], 50.0)
+
+        # GpuMonitor background writing
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_file = Path(tmpdir) / "gpu_samples.jsonl"
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout=mock_7)
+                with GpuMonitor("mon-run", out_file, interval_sec=0.05, binary_path="/mock/smi") as mon:
+                    time.sleep(0.12)
+                self.assertGreaterEqual(mon.sample_count, 1)
+                self.assertTrue(out_file.exists())
+                first_line = json.loads(out_file.read_text().splitlines()[0])
+                self.assertEqual(first_line["run_id"], "mon-run")
+                self.assertEqual(first_line["source"], "nvidia-smi")
+
+    def test_system_monitor_and_sample(self):
+        """Verify /proc/meminfo reading, decimal MB conversion, and SystemMonitor."""
+        from collector.system import collect_system_sample, SystemMonitor
+
+        mem_text = "MemTotal:       16384000 kB\nMemFree:         4096000 kB\nMemAvailable:    8000000 kB\n"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake_meminfo = Path(tmpdir) / "meminfo"
+            fake_meminfo.write_text(mem_text)
+
+            sample = collect_system_sample(run_id="sys-test", meminfo_path=fake_meminfo)
+            # 8000000 kB * 1024 / 1_000_000 = 8192.0 MB
+            self.assertAlmostEqual(sample["mem_available_mb"], 8192.0, places=1)
+            self.assertEqual(sample["source"], "proc")
+            self.assertIsNone(sample["disk_read_p95_ms"])
+
+            out_file = Path(tmpdir) / "system_samples.jsonl"
+            with SystemMonitor("sys-mon", out_file, interval_sec=0.05, meminfo_path=fake_meminfo) as mon:
+                time.sleep(0.12)
+            self.assertGreaterEqual(mon.sample_count, 1)
+            first_line = json.loads(out_file.read_text().splitlines()[0])
+            self.assertEqual(first_line["run_id"], "sys-mon")
+            self.assertEqual(first_line["source"], "proc")
+
+    def test_generate_aligned_snapshots_v02(self):
+        """Verify aligned_snapshots.jsonl conforms to TraceKV v0.2 specification."""
+        from collector.correlator import generate_aligned_snapshots, write_aligned_snapshots
+        from contracts.schema import validate_snapshot
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            sched_sum_path = base / "sched_summary.json"
+            sched_ev_path = base / "sched_events.jsonl"
+            gpu_path = base / "gpu_samples.jsonl"
+            sys_path = base / "system_samples.jsonl"
+            kv_path = base / "kv_samples.jsonl"
+            out_snapshots = base / "aligned_snapshots.jsonl"
+
+            # Anchor: start_wall_ns at epoch 1000s, start_mono_ns at 100s
+            sched_sum_path.write_text(json.dumps({
+                "scope": "system",
+                "start_wall_ns": 1_000_000_000_000,
+                "start_monotonic_ns": 100_000_000_000,
+            }))
+
+            # Event 1 at mono 100.2s -> wall 1000.2s, lat 15us
+            # Event 2 at mono 101.5s -> wall 1001.5s, lat 85us
+            sched_ev_path.write_text(
+                json.dumps({"timestamp_ns": 100_200_000_000, "value": 15000, "comm": "vllm"}) + "\n" +
+                json.dumps({"timestamp_ns": 101_500_000_000, "value": 85000, "comm": "vllm"}) + "\n"
+            )
+
+            # GPU sample at 1000.4s and 101.4s
+            gpu_path.write_text(
+                json.dumps({"timestamp": "1970-01-01T00:16:40.400000Z", "memory_used_mb": 4096.0, "source": "nvidia-smi"}) + "\n" +
+                json.dumps({"timestamp": "1970-01-01T00:16:41.400000Z", "memory_used_mb": 4200.0, "source": "nvidia-smi"}) + "\n"
+            )
+
+            # System sample at 1000.1s and 101.1s
+            sys_path.write_text(
+                json.dumps({"timestamp": "1970-01-01T00:16:40.100000Z", "mem_available_mb": 8192.0, "source": "proc"}) + "\n" +
+                json.dumps({"timestamp": "1970-01-01T00:16:41.100000Z", "mem_available_mb": 8000.0, "source": "proc"}) + "\n"
+            )
+
+            # KV sample at 1000.5s
+            kv_path.write_text(
+                json.dumps({"timestamp": "1970-01-01T00:16:40.500000Z", "usage_ratio": 0.65, "prefix_hit_ratio": 0.30, "running_requests": 2}) + "\n"
+            )
+
+            snaps = generate_aligned_snapshots(
+                run_id="run-exp-v02",
+                sched_events_path=sched_ev_path,
+                sched_summary_path=sched_sum_path,
+                gpu_samples_path=gpu_path,
+                system_samples_path=sys_path,
+                kv_samples_path=kv_path,
+                bucket_sec=1.0,
+                strict_anchor=True,
+            )
+
+            self.assertGreaterEqual(len(snaps), 2)
+
+            # Each snapshot must strictly pass contracts/schema.py
+            for s in snaps:
+                validate_snapshot(s)
+                self.assertEqual(s["schema_version"], "0.1")
+                self.assertEqual(s["run_id"], "run-exp-v02")
+                self.assertIn("window_start_utc", s)
+                self.assertIn("window_end_utc", s)
+                self.assertEqual(s["sched"]["scope"], "system")
+
+            # Check window 0 (1000.0s to 1001.0s)
+            w0 = snaps[0]
+            self.assertEqual(w0["sched"]["event_count"], 1)
+            self.assertEqual(w0["sched"]["p50_us"], 15.0)
+            self.assertEqual(w0["gpu"]["memory_used_mb"], 4096.0)
+            self.assertEqual(w0["sources"]["gpu"], "nvidia-smi")
+            self.assertEqual(w0["sources"]["system"], "proc+ebpf_sched")
+            self.assertEqual(w0["kv"]["usage_ratio"], 0.65)
+
+            # Check window 1 (1001.0s to 1002.0s)
+            w1 = snaps[1]
+            self.assertEqual(w1["sched"]["event_count"], 1)
+            self.assertEqual(w1["sched"]["p50_us"], 85.0)
+            self.assertEqual(w1["gpu"]["memory_used_mb"], 4200.0)
+
+            # Test write_aligned_snapshots
+            count = write_aligned_snapshots(snaps, out_snapshots)
+            self.assertEqual(count, len(snaps))
+            self.assertTrue(out_snapshots.exists())
+
+    def test_strict_anchor_rejection(self):
+        """When anchors are missing and strict_anchor=True, an error is raised."""
+        from collector.correlator import generate_aligned_snapshots
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ev_file = Path(tmpdir) / "sched.jsonl"
+            ev_file.write_text(json.dumps({"timestamp_ns": 100, "value": 10}) + "\n")
+            with self.assertRaises(ValueError):
+                generate_aligned_snapshots(
+                    run_id="r",
+                    sched_events_path=ev_file,
+                    sched_summary_path=None,
+                    strict_anchor=True,
+                )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
