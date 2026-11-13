@@ -1,0 +1,1 @@
+{"request_id": 0, "case_id": "kv_definition", "started_at_utc": "2026-11-13T01:54:50.454390+00:00", "success": true, "ttft_ms": 736.292337000009, "completion_tokens": 16, "prompt_tokens": 41, "output_text": "在大模型推理中，使用KV（键值对）缓存可以", "finish_reason": "length", "e2e_ms": 1533.3374920001006, "run_id": "20261113T015413Z-gpu-only-2bacd4d505"}

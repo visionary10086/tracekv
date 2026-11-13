@@ -49,6 +49,7 @@ def collect_gpu_metrics(binary_path: str | None = None) -> dict:
 
     cmd = [
         smi,
+        "--id=0",
         "--query-gpu=memory.used,memory.total,utilization.gpu,temperature.gpu,power.draw",
         "--format=csv,noheader,nounits",
     ]
@@ -76,13 +77,17 @@ def collect_gpu_metrics(binary_path: str | None = None) -> dict:
 
         # nvidia-smi reports in MiB; contracts/schema.py defines decimal MB:
         # MB = MiB * 1024 * 1024 / 1_000_000
-        used_mib = float(parts[0])
-        total_mib = float(parts[1]) if len(parts) > 1 else None
-        util_pct = float(parts[2]) if len(parts) > 2 else None
-        temp_c = float(parts[3]) if len(parts) > 3 else None
-        power_w = float(parts[4]) if len(parts) > 4 else None
+        def field(index):
+            try:
+                value = float(parts[index])
+                import math
+                return value if math.isfinite(value) and value >= 0 else None
+            except (ValueError, IndexError):
+                return None
 
-        used_mb = round(used_mib * 1024 * 1024 / 1_000_000, 2)
+        used_mib, total_mib, util_pct, temp_c, power_w = (field(i) for i in range(5))
+
+        used_mb = round(used_mib * 1024 * 1024 / 1_000_000, 2) if used_mib is not None else None
         total_mb = round(total_mib * 1024 * 1024 / 1_000_000, 2) if total_mib is not None else None
 
         return {
@@ -91,7 +96,7 @@ def collect_gpu_metrics(binary_path: str | None = None) -> dict:
             "utilization_pct": util_pct,
             "temperature_c": temp_c,
             "power_w": power_w,
-            "source": "nvidia-smi",
+            "source": "nvidia-smi" if used_mb is not None else "unavailable",
         }
     except (subprocess.TimeoutExpired, OSError, ValueError, IndexError):
         return {

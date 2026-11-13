@@ -71,7 +71,7 @@ class VllmMetricTests(unittest.TestCase):
 
 try:
     from fastapi.testclient import TestClient
-    from app.main import app
+    from app.main import app, monitor
 except ImportError:
     TestClient = None
 
@@ -80,11 +80,12 @@ except ImportError:
 class ApiTests(unittest.TestCase):
     def test_http_flow(self):
         client = TestClient(app)
-        response = client.get("/api/v1/snapshot")
+        with patch.object(monitor, "get_history", return_value=[SAMPLE]):
+            response = client.get("/api/v1/snapshot")
         self.assertEqual(response.status_code, 200)
         snapshot = response.json()
         self.assertIs(validate_snapshot(snapshot), snapshot)
-        self.assertEqual(snapshot["sources"]["kv"], "unavailable")
+        self.assertEqual(snapshot["sources"]["kv"], SAMPLE["sources"]["kv"])
         response = client.post("/api/v1/policy/evaluate", json=SAMPLE)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["policy"], "os_aware")

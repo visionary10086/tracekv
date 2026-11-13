@@ -9,6 +9,16 @@
 - 并发 1、2、4 各三轮，每轮 30 次正式请求，共 270/270 成功。原始结果见 `results/20261101-wsl-02/`，解释和限制见 [阶段测试报告](docs/队长阶段测试报告_2026-11-01.md)。
 - 这些是短提示小模型基线，缓存状态未重置；没有验证 eBPF 开销、真实 KV 迁移或长上下文性能。
 
+## Linux 可视化监测平台
+
+在 Linux 仓库根目录运行：
+
+    /opt/tracekv/venv/bin/python -m tools.serve_platform
+
+打开 http://localhost:8010 ，查看 GPU / 系统 / KV 实时曲线，启动与停止真实推理实验，
+检查逐请求记录、原始采样及报告。页面离线可用，无需 Node 构建。
+本版尚未接入 eBPF 页面和自动对照批次；具体范围见 [平台使用说明](docs/Linux监测平台_使用与验收.md)。
+
 ## MVP v0.1 联调接口
 
 已提供统一快照、Linux `/proc` 可用内存采样、vLLM `/metrics` 的 KV 窗口指标适配、演示规则和 FastAPI 两个接口。当前可运行接口见 [MVP v0.1 接口文档](docs/interfaces.md)；下一轮三人联调的数据、目录、时间和验收约定见 [联调接口规范 v0.2](docs/联调接口规范_v0.2.md)（实施协议，部分接口尚未实现）。[模拟快照](contracts/sample_snapshot.json)只用于接口测试。

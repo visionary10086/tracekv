@@ -1,0 +1,3 @@
+{"memory_used_mb": 2764.05, "memory_total_mb": 8546.94, "utilization_pct": 13.0, "temperature_c": 54.0, "power_w": 29.89, "source": "nvidia-smi", "run_id": "20261113T015131Z-cpu-lru-b7d86da14e", "timestamp": "2026-11-13T01:52:09.991655Z", "window_ms": 1000}
+{"memory_used_mb": 2764.05, "memory_total_mb": 8546.94, "utilization_pct": 18.0, "temperature_c": 55.0, "power_w": 38.03, "source": "nvidia-smi", "run_id": "20261113T015131Z-cpu-lru-b7d86da14e", "timestamp": "2026-11-13T01:52:11.092316Z", "window_ms": 1101}
+{"memory_used_mb": 2752.51, "memory_total_mb": 8546.94, "utilization_pct": 27.0, "temperature_c": 55.0, "power_w": 41.41, "source": "nvidia-smi", "run_id": "20261113T015131Z-cpu-lru-b7d86da14e", "timestamp": "2026-11-13T01:52:11.489137Z", "window_ms": 397}

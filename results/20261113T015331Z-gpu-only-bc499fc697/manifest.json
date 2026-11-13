@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "run_id": "20261113T015331Z-gpu-only-bc499fc697",
+  "comparison_id": null,
+  "status": "interrupted",
+  "phase": "finished",
+  "created_at_utc": "2026-11-13T01:53:31.245245Z",
+  "config": {
+    "model_path": "/opt/tracekv/models/qwen2.5-0.5b-instruct",
+    "served_name": "tracekv-model",
+    "vllm_version": "0.11.2",
+    "workload_path": "/home/visionary/tracekv/workloads/smoke.jsonl",
+    "policy": "gpu_only",
+    "requests": 6,
+    "warmup": 1,
+    "concurrency": 1,
+    "max_tokens": 32,
+    "gpu_kv_blocks": 64,
+    "cpu_kv_blocks": 0,
+    "max_model_len": 1024,
+    "max_num_seqs": 4,
+    "port": 8000,
+    "sample_interval_ms": 1000,
+    "timeout": 120,
+    "startup_timeout": 600
+  },
+  "recorded_requests": 0,
+  "sources": {
+    "sched": {
+      "status": "unavailable",
+      "error": "Not connected in this milestone"
+    },
+    "gpu": {
+      "status": "unavailable",
+      "error": "No sample collected"
+    },
+    "system": {
+      "status": "unavailable",
+      "error": "No sample collected"
+    },
+    "kv": {
+      "status": "unavailable",
+      "error": "No sample collected"
+    }
+  },
+  "runner_ready": true,
+  "workload_sha256": "f366b123d20bf29145d5e04636c0ce65ca2071ce15feece36b0e7280381ca1a7",
+  "cache_preparation": "fresh server, deterministic cyclic warmup; no per-request reset",
+  "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+  "kernel": "6.6.87.2-microsoft-standard-WSL2",
+  "clock_anchor": {
+    "wall_ns": 1794534811349784748,
+    "monotonic_ns": 648926002631
+  },
+  "git_commit": "99416bfc3c8497b98eb2e60300cca070c6028198",
+  "git_worktree_dirty": true,
+  "config.json_sha256": "18e18afcaccafade98daf13a54092927904649e1dd4eba8299ab717d5d94ff45",
+  "tokenizer_config.json_sha256": "5b5d4f65d0acd3b2d56a35b56d374a36cbc1c8fa5cf3b3febbbfabf22f359583",
+  "model_revision": null,
+  "model_identity_note": "Local config hashes recorded; exact weight revision is not verified.",
+  "server_command": [
+    "/opt/tracekv/venv/bin/python",
+    "/home/visionary/tracekv/tools/launch_vllm.py",
+    "--model",
+    "/opt/tracekv/models/qwen2.5-0.5b-instruct",
+    "--expected-version",
+    "0.11.2",
+    "--served-name",
+    "tracekv-model",
+    "--port",
+    "8000",
+    "--max-model-len",
+    "1024",
+    "--max-num-seqs",
+    "4",
+    "--num-gpu-blocks-override",
+    "64",
+    "--enforce-eager",
+    "--out",
+    "/home/visionary/tracekv/results/20261113T015331Z-gpu-only-bc499fc697/server"
+  ],
+  "runtime_environment": {
+    "OMP_NUM_THREADS": "4",
+    "HF_HUB_OFFLINE": "1",
+    "TRANSFORMERS_OFFLINE": "1",
+    "XDG_CACHE_HOME": "/opt/tracekv/cache",
+    "HF_HOME": "/opt/tracekv/cache/huggingface",
+    "TRITON_CACHE_DIR": "/opt/tracekv/cache/triton",
+    "VLLM_CACHE_ROOT": "/opt/tracekv/cache/vllm",
+    "CUDA_CACHE_PATH": "/opt/tracekv/cache/cuda"
+  },
+  "server_pid": 2000,
+  "error": "Experiment cancelled",
+  "finished_at_utc": "2026-11-13T01:53:35.344500Z"
+}

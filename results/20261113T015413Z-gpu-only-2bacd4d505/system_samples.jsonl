@@ -1,0 +1,3 @@
+{"mem_available_mb": 5192.45, "disk_read_p95_ms": null, "disk_read_bytes_per_s": null, "run_id": "20261113T015413Z-gpu-only-2bacd4d505", "timestamp": "2026-11-13T01:54:52.090985Z", "window_ms": 1000, "source": "proc"}
+{"mem_available_mb": 5180.305, "disk_read_p95_ms": null, "disk_read_bytes_per_s": null, "run_id": "20261113T015413Z-gpu-only-2bacd4d505", "timestamp": "2026-11-13T01:54:53.215120Z", "window_ms": 1124, "source": "proc"}
+{"mem_available_mb": 5191.893, "disk_read_p95_ms": null, "disk_read_bytes_per_s": null, "run_id": "20261113T015413Z-gpu-only-2bacd4d505", "timestamp": "2026-11-13T01:54:53.739050Z", "window_ms": 524, "source": "proc"}
