@@ -1,0 +1,60 @@
+{
+  "date": "2026-11-13",
+  "environment": "Ubuntu-24.04 WSL; RTX 5070 Laptop; vLLM 0.11.2; Qwen2.5-0.5B-Instruct",
+  "unit_tests": 90,
+  "experiments": [
+    {
+      "run_id": "20261113T015131Z-cpu-lru-b7d86da14e",
+      "status": "completed",
+      "summary": {
+        "requests": 3,
+        "successful_requests": 3,
+        "failed_requests": 0,
+        "failure_rate": 0.0,
+        "measurement_seconds": 1.4143140590000485,
+        "successful_requests_per_second": 2.121169609330665,
+        "successful_output_tokens": 48,
+        "successful_output_tokens_per_second": 33.93871374929064,
+        "client_ttft_ms_p50": 42.486032000056184,
+        "client_ttft_ms_p95": 53.90099389998113,
+        "client_e2e_ms_p50": 473.63986499999555,
+        "client_e2e_ms_p95": 493.1430854999917,
+        "small_sample_warning": true,
+        "metric_note": "Client TTFT is time to first nonempty visible-content chunk (includes network); E2E ends after stream validation. No per-token ITL is inferred from chunks. Output throughput uses successful requests only and includes failed-request time in the denominator."
+      },
+      "aligned_windows": 2
+    },
+    {
+      "run_id": "20261113T015413Z-gpu-only-2bacd4d505",
+      "status": "completed",
+      "summary": {
+        "requests": 3,
+        "successful_requests": 3,
+        "failed_requests": 0,
+        "failure_rate": 0.0,
+        "measurement_seconds": 1.5673531670000784,
+        "successful_requests_per_second": 1.9140548940491915,
+        "successful_output_tokens": 48,
+        "successful_output_tokens_per_second": 30.624878304787064,
+        "client_ttft_ms_p50": 30.884044000003996,
+        "client_ttft_ms_p95": 57.84226959995067,
+        "client_e2e_ms_p50": 523.9554489999136,
+        "client_e2e_ms_p95": 583.1584371999156,
+        "small_sample_warning": true,
+        "metric_note": "Client TTFT is time to first nonempty visible-content chunk (includes network); E2E ends after stream validation. No per-token ITL is inferred from chunks. Output throughput uses successful requests only and includes failed-request time in the denominator."
+      },
+      "aligned_windows": 2
+    }
+  ],
+  "limitations": [
+    "Smoke validation only; no performance improvement conclusion",
+    "eBPF not connected to this UI",
+    "Exact model weights revision not verified"
+  ],
+  "cancel_validation": {
+    "run_id": "20261113T015331Z-gpu-only-bc499fc697",
+    "status": "interrupted",
+    "report_exists": true
+  },
+  "model_port_released": true
+}

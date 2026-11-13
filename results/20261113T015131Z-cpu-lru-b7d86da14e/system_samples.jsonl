@@ -1,0 +1,3 @@
+{"mem_available_mb": 5160.534, "disk_read_p95_ms": null, "disk_read_bytes_per_s": null, "run_id": "20261113T015131Z-cpu-lru-b7d86da14e", "timestamp": "2026-11-13T01:52:09.991655Z", "window_ms": 1000, "source": "proc"}
+{"mem_available_mb": 5172.933, "disk_read_p95_ms": null, "disk_read_bytes_per_s": null, "run_id": "20261113T015131Z-cpu-lru-b7d86da14e", "timestamp": "2026-11-13T01:52:11.092316Z", "window_ms": 1101, "source": "proc"}
+{"mem_available_mb": 5173.94, "disk_read_p95_ms": null, "disk_read_bytes_per_s": null, "run_id": "20261113T015131Z-cpu-lru-b7d86da14e", "timestamp": "2026-11-13T01:52:11.489137Z", "window_ms": 397, "source": "proc"}
