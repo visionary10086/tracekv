@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "run_id": "20261113T015131Z-cpu-lru-b7d86da14e",
+  "comparison_id": null,
+  "status": "completed",
+  "phase": "finished",
+  "created_at_utc": "2026-11-13T01:51:31.169505Z",
+  "config": {
+    "model_path": "/opt/tracekv/models/qwen2.5-0.5b-instruct",
+    "served_name": "tracekv-model",
+    "vllm_version": "0.11.2",
+    "workload_path": "/home/visionary/tracekv/workloads/smoke.jsonl",
+    "policy": "cpu_lru",
+    "requests": 3,
+    "warmup": 1,
+    "concurrency": 1,
+    "max_tokens": 16,
+    "gpu_kv_blocks": 64,
+    "cpu_kv_blocks": 72,
+    "max_model_len": 1024,
+    "max_num_seqs": 4,
+    "port": 8000,
+    "sample_interval_ms": 1000,
+    "timeout": 120,
+    "startup_timeout": 600
+  },
+  "recorded_requests": 3,
+  "sources": {
+    "system": {
+      "status": "ok",
+      "error": null
+    },
+    "gpu": {
+      "status": "ok",
+      "error": null
+    },
+    "kv": {
+      "status": "ok",
+      "error": null
+    },
+    "sched": {
+      "status": "unavailable",
+      "error": "eBPF live collection not connected in this milestone"
+    }
+  },
+  "runner_ready": true,
+  "workload_sha256": "f366b123d20bf29145d5e04636c0ce65ca2071ce15feece36b0e7280381ca1a7",
+  "cache_preparation": "fresh server, deterministic cyclic warmup; no per-request reset",
+  "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+  "kernel": "6.6.87.2-microsoft-standard-WSL2",
+  "clock_anchor": {
+    "wall_ns": 1794534691275141734,
+    "monotonic_ns": 528851359414
+  },
+  "git_commit": "99416bfc3c8497b98eb2e60300cca070c6028198",
+  "config.json_sha256": "18e18afcaccafade98daf13a54092927904649e1dd4eba8299ab717d5d94ff45",
+  "tokenizer_config.json_sha256": "5b5d4f65d0acd3b2d56a35b56d374a36cbc1c8fa5cf3b3febbbfabf22f359583",
+  "model_revision": null,
+  "model_identity_note": "Local config hashes recorded; exact weight revision is not verified.",
+  "server_command": [
+    "/opt/tracekv/venv/bin/python",
+    "/home/visionary/tracekv/tools/launch_vllm.py",
+    "--model",
+    "/opt/tracekv/models/qwen2.5-0.5b-instruct",
+    "--expected-version",
+    "0.11.2",
+    "--served-name",
+    "tracekv-model",
+    "--port",
+    "8000",
+    "--max-model-len",
+    "1024",
+    "--max-num-seqs",
+    "4",
+    "--num-gpu-blocks-override",
+    "64",
+    "--enforce-eager",
+    "--out",
+    "/home/visionary/tracekv/results/20261113T015131Z-cpu-lru-b7d86da14e/server",
+    "--cpu-kv-blocks",
+    "72"
+  ],
+  "runtime_environment": {
+    "OMP_NUM_THREADS": "4",
+    "HF_HUB_OFFLINE": "1",
+    "TRANSFORMERS_OFFLINE": "1",
+    "XDG_CACHE_HOME": "/opt/tracekv/cache",
+    "HF_HOME": "/opt/tracekv/cache/huggingface",
+    "TRITON_CACHE_DIR": "/opt/tracekv/cache/triton",
+    "VLLM_CACHE_ROOT": "/opt/tracekv/cache/vllm",
+    "CUDA_CACHE_PATH": "/opt/tracekv/cache/cuda"
+  },
+  "server_pid": 1592,
+  "measurement_started_at_utc": "2026-11-13T01:52:09.992958Z",
+  "measurement_finished_at_utc": "2026-11-13T01:52:11.407269Z",
+  "measurement_seconds": 1.4143140590000485,
+  "finished_at_utc": "2026-11-13T01:52:12.997580Z"
+}

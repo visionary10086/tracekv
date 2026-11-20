@@ -232,7 +232,7 @@ class TestEventToJsonl(unittest.TestCase):
         line1 = event_to_jsonl(ev, "r", target_pids=[42])
         d1 = json.loads(line1)
         self.assertTrue(d1["is_target"])
-        self.assertEqual(d1["pid"], 42)
+        self.assertIsNone(d1["pid"])
 
         # Target PID mismatch
         line2 = event_to_jsonl(ev, "r", target_pids=[99])
@@ -244,7 +244,7 @@ class TestEventToJsonl(unittest.TestCase):
         line3 = event_to_jsonl(ev, "r", target_comm="vllm")
         d3 = json.loads(line3)
         self.assertTrue(d3["is_target"])
-        self.assertEqual(d3["pid"], 42)
+        self.assertIsNone(d3["pid"])
 
 
 # ===========================================================================
@@ -380,7 +380,7 @@ class TestProcessStream(unittest.TestCase):
             output=output,
             target_pids=[20],
         )
-        self.assertEqual(res.scope, "target_process")
+        self.assertEqual(res.scope, "target_threads")
         self.assertEqual(res.target_pids, [20])
         # System stats include all 3 events
         self.assertEqual(res.stats.event_count, 3)
@@ -400,7 +400,7 @@ class TestProcessStream(unittest.TestCase):
 
         # Verify stats_to_dict
         d = stats_to_dict(res)
-        self.assertEqual(d["scope"], "target_process")
+        self.assertEqual(d["scope"], "target_threads")
         self.assertEqual(d["target_pids"], [20])
         self.assertEqual(d["event_count"], 2)
         self.assertEqual(d["mean_ns"], 3000.0)
@@ -416,7 +416,7 @@ class TestProcessStream(unittest.TestCase):
             "comm-filter-run",
             target_comm="vllm_engine",
         )
-        self.assertEqual(res.scope, "target_process")
+        self.assertEqual(res.scope, "comm_match")
         self.assertEqual(res.target_comm, "vllm_engine")
         self.assertEqual(res.stats.event_count, 2)
         self.assertEqual(res.target_stats.event_count, 1)
@@ -858,7 +858,7 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(snap["system"]["sched_p50_us"], 5.0)
         self.assertEqual(snap["system"]["sched_p95_us"], 15.0)
         self.assertEqual(snap["system"]["sched_p99_us"], 35.0)
-        self.assertEqual(snap["system"]["sched_preempt_count"], 42)
+        self.assertEqual(snap["system"]["sched_unmatched_switch_count"], 42)
         self.assertIn("sched", snap)
         self.assertEqual(snap["sched"]["event_count"], 500)
 
@@ -1234,14 +1234,14 @@ class TestV02Integration(unittest.TestCase):
         y = [5.0, 5.0, 5.0, 5.0, 95.0, 5.0, 5.0, 5.0, 95.0, 5.0]
         res = compute_lagged_correlation(x, y, max_lag=2)
         self.assertEqual(res["peak_lag"], 1)
-        self.assertEqual(res["causal_direction"], "x_leads_y")
+        self.assertEqual(res["temporal_direction"], "x_leads_y")
         self.assertGreater(res["peak_correlation"], 0.7)
 
         # Case 2: Synchronous co-movement
         z = [v * 2.0 for v in x]
         res_sync = compute_lagged_correlation(x, z, max_lag=2)
         self.assertEqual(res_sync["peak_lag"], 0)
-        self.assertEqual(res_sync["causal_direction"], "synchronous")
+        self.assertEqual(res_sync["temporal_direction"], "synchronous")
         self.assertAlmostEqual(res_sync["peak_correlation"], 1.0, places=2)
 
     def test_analyze_kv_pcie_transfers(self):
@@ -1295,7 +1295,7 @@ class TestV02Integration(unittest.TestCase):
             self.assertEqual(res["cpu_to_gpu_transfers"], 1)
             self.assertEqual(res["total_gpu_blocks"], 48)
             # 25,000 MB/s on 31,500 MB/s link is ~79.37% saturation -> PCIE_BUS_SATURATION
-            self.assertEqual(res["bottleneck"], "PCIE_BUS_SATURATION")
+            self.assertEqual(res["bottleneck"], "HIGH_PCIE_UTILIZATION")
             self.assertGreater(res["pcie_physical"]["bus_saturation_pct"], 75.0)
 
             # --- NO_PCIE_TELEMETRY: legacy nvidia-smi samples without pcie fields ---
@@ -1315,8 +1315,7 @@ class TestV02Integration(unittest.TestCase):
                 res_legacy["bottleneck"], "NO_PCIE_TELEMETRY",
                 "Legacy nvidia-smi samples without PCIe fields must yield NO_PCIE_TELEMETRY",
             )
-            self.assertFalse(res_legacy.get("pcie_physical", {}).get("bus_saturation_pct", -1) > 0,
-                             "No saturation data should be present for legacy samples")
+            self.assertIsNone(res_legacy["pcie_physical"]["bus_saturation_pct"])
 
     def test_diagnose_system_bottlenecks(self):
         """Verify automated bottleneck attribution across scheduling, PCIe and memory."""
@@ -1359,7 +1358,7 @@ class TestV02Integration(unittest.TestCase):
             }
         ]
         diag3 = diagnose_system_bottlenecks(snaps_healthy)
-        self.assertEqual(diag3["primary_bottleneck"], "GPU_COMPUTE_BOUND")
+        self.assertEqual(diag3["primary_bottleneck"], "GPU_HIGH_UTILIZATION")
         self.assertEqual(diag3["severity"], "INFO")
 
     def test_subsecond_aligned_snapshots_with_target(self):
@@ -1412,7 +1411,7 @@ class TestV02Integration(unittest.TestCase):
             self.assertGreaterEqual(len(snaps), 1)
             snap0 = snaps[0]
             self.assertEqual(snap0["window_ms"], 100)
-            self.assertEqual(snap0["sched"]["scope"], "target_process")
+            self.assertEqual(snap0["sched"]["scope"], "target_threads")
             self.assertEqual(snap0["sched"]["event_count"], 1)
             self.assertEqual(snap0["sched"]["system_baseline"]["event_count"], 2)
             self.assertEqual(snap0["gpu"]["pcie_tx_kb_per_s"], 50000)

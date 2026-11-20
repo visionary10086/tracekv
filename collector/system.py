@@ -20,6 +20,7 @@ import argparse
 from datetime import datetime, timezone
 import json
 import os
+import re
 from pathlib import Path
 import threading
 import time
@@ -67,7 +68,7 @@ def _read_meminfo(meminfo_path: str | Path = "/proc/meminfo") -> dict[str, float
     swap_used_pct = (
         round((swap_used_mb / swap_tot_mb) * 100, 1)
         if swap_tot_mb and swap_used_mb is not None and swap_tot_mb > 0
-        else 0.0
+        else (0.0 if swap_tot_mb == 0 else None)
     )
 
     return {
@@ -166,6 +167,7 @@ def _read_cpu_ticks_and_ctxt(stat_path: str | Path = "/proc/stat") -> tuple[dict
                     "iowait": int(parts[5]),
                     "irq": int(parts[6]),
                     "softirq": int(parts[7]),
+                    "steal": int(parts[8]) if len(parts) > 8 else 0,
                 }
             elif parts[0] == "ctxt" and len(parts) >= 2:
                 ctxt_total = int(parts[1])
@@ -174,7 +176,7 @@ def _read_cpu_ticks_and_ctxt(stat_path: str | Path = "/proc/stat") -> tuple[dict
     return (cpu_ticks if cpu_ticks else None, ctxt_total)
 
 
-def _read_disk_sectors(diskstats_path: str | Path = "/proc/diskstats") -> tuple[int, int, int, int]:
+def _read_disk_sectors(diskstats_path: str | Path = "/proc/diskstats") -> tuple[int, int, int, int] | None:
     """Read total read/write sectors and ops across main block devices (sd*, nvme*, vd*)."""
     tot_read_sec = 0
     tot_write_sec = 0
@@ -188,7 +190,7 @@ def _read_disk_sectors(diskstats_path: str | Path = "/proc/diskstats") -> tuple[
                 continue
             dev_name = parts[2]
             # Match physical block disks (e.g. sda, sdb, nvme0n1, vda), ignore loop/ram partitions
-            if dev_name.startswith(("loop", "ram")):
+            if not re.fullmatch(r"(?:sd[a-z]+|vd[a-z]+|xvd[a-z]+|nvme[0-9]+n[0-9]+|mmcblk[0-9]+)", dev_name):
                 continue
             # Parts mapping: 3: read_ops, 5: sectors_read, 7: write_ops, 9: sectors_written
             tot_read_ops += int(parts[3])
@@ -196,7 +198,7 @@ def _read_disk_sectors(diskstats_path: str | Path = "/proc/diskstats") -> tuple[
             tot_write_ops += int(parts[7])
             tot_write_sec += int(parts[9])
     except (OSError, ValueError, IndexError):
-        pass
+        return None
     return tot_read_sec, tot_write_sec, tot_read_ops, tot_write_ops
 
 
@@ -212,7 +214,9 @@ def _read_target_proc_metrics(
         return None, None
 
     try:
-        stat_parts = stat_file.read_text(encoding="utf-8").split()
+        stat_text = stat_file.read_text(encoding="utf-8")
+        # comm in parentheses may contain spaces and closing parentheses.
+        stat_parts = ["pid", "comm"] + stat_text.rsplit(")", 1)[1].split()
         # utime=13, stime=14, minflt=9, majflt=11 (0-indexed)
         utime = int(stat_parts[13])
         stime = int(stat_parts[14])
@@ -252,9 +256,9 @@ def _read_target_proc_metrics(
             "vsz_mb": round(vsz_kb * 1024 / 1_000_000, 2),
             "threads": threads,
             "voluntary_ctxt_switches": vol_ctxt,
-            "nonvoluntary_ctxt_switches": nonvol_ctxt,  # Involuntary preemptions!
+            "nonvoluntary_ctxt_switches": nonvol_ctxt,  # Main-thread context-switch counter.
             "minor_page_faults": minflt,
-            "major_page_faults": majflt,  # Triggered disk/swap I/O
+            "major_page_faults": majflt,  # Fault count, not measured disk latency.
         }
         return proc_info, (utime, stime)
     except (OSError, ValueError, IndexError, ProcessLookupError, PermissionError):
@@ -278,7 +282,7 @@ def collect_system_sample(
         return_state: If True, returns (sample_dict, new_state_dict) for stateful
                       rate tracking across iterations. If False, returns sample_dict.
     """
-    now_ts = time.time()
+    now_ts = time.monotonic()
     now_iso = _utc_now_iso()
 
     # 1. Memory metrics
@@ -298,8 +302,8 @@ def collect_system_sample(
     if prev_state and "last_time" in prev_state:
         dt_sec = max(0.001, now_ts - prev_state["last_time"])
 
-    if cpu_ticks and prev_state and "cpu_ticks" in prev_state and dt_sec:
-        old_ticks = prev_state["cpu_ticks"]
+    if cpu_ticks and prev_state and prev_state.get("cpu_ticks") and dt_sec:
+        old_ticks = prev_state["cpu_ticks"] or {}
         delta_user = cpu_ticks["user"] - old_ticks.get("user", 0)
         delta_sys = cpu_ticks["system"] - old_ticks.get("system", 0)
         delta_iowait = cpu_ticks["iowait"] - old_ticks.get("iowait", 0)
@@ -312,7 +316,7 @@ def collect_system_sample(
             cpu_sys = round((delta_sys / delta_tot) * 100.0, 1)
             cpu_iowait = round((delta_iowait / delta_tot) * 100.0, 1)
 
-    if ctxt_total is not None and prev_state and "ctxt_total" in prev_state and dt_sec:
+    if ctxt_total is not None and prev_state and prev_state.get("ctxt_total") is not None and dt_sec:
         delta_ctxt = ctxt_total - prev_state["ctxt_total"]
         if delta_ctxt >= 0:
             ctxt_rate = round(delta_ctxt / dt_sec, 1)
@@ -324,13 +328,14 @@ def collect_system_sample(
     psi_dict = _read_psi(pressure_dir)
 
     # 5. Disk I/O from /proc/diskstats
-    r_sec, w_sec, r_ops, w_ops = _read_disk_sectors(diskstats_path)
+    disk_counters = _read_disk_sectors(diskstats_path)
     disk_read_bytes_s: float | None = None
     disk_write_bytes_s: float | None = None
     disk_read_iops: float | None = None
     disk_write_iops: float | None = None
 
-    if prev_state and "disk_sectors" in prev_state and dt_sec:
+    if disk_counters is not None and prev_state and prev_state.get("disk_sectors") is not None and dt_sec:
+        r_sec, w_sec, r_ops, w_ops = disk_counters
         old_r_sec, old_w_sec, old_r_ops, old_w_ops = prev_state["disk_sectors"]
         delta_r_bytes = max(0, (r_sec - old_r_sec) * 512)
         delta_w_bytes = max(0, (w_sec - old_w_sec) * 512)
@@ -353,7 +358,7 @@ def collect_system_sample(
         "last_time": now_ts,
         "cpu_ticks": cpu_ticks,
         "ctxt_total": ctxt_total,
-        "disk_sectors": (r_sec, w_sec, r_ops, w_ops),
+        "disk_sectors": disk_counters,
         "target_proc_ticks": target_ticks_new,
     }
 

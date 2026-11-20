@@ -54,7 +54,7 @@ def build_unified_snapshot(
         Optional VllmAdapter instance for sampling live KV cache metrics.
     sched_summary:
         Optional summary dict from `collector.cpu_scheduler.CollectorResult`.
-        If present, CPU scheduler latency metrics (P50, P95, P99, preemption)
+        If present, CPU scheduler latency metrics (P50, P95, P99, unmatched switch-ins)
         are injected into `system` (preserving contract) and `sched`.
     gpu_metrics:
         Optional pre-collected GPU metrics dict. If None, queries live via `collector.gpu`.
@@ -71,14 +71,14 @@ def build_unified_snapshot(
     effective_run_id = run_id or f"snapshot-{uuid4().hex[:12]}"
 
     # 1. System metrics (/proc/meminfo)
-    sys_raw = system_metrics or collect_system_metrics()
+    sys_raw = collect_system_metrics() if system_metrics is None else system_metrics
     mem_available = sys_raw.get("mem_available_mb")
     disk_read_p95 = sys_raw.get("disk_read_p95_ms")
     disk_read_bytes = sys_raw.get("disk_read_bytes_per_s")
     sys_source = sys_raw.get("source", "proc")
 
     # 2. GPU telemetry (nvidia-smi)
-    gpu_raw = gpu_metrics or collect_gpu_metrics()
+    gpu_raw = collect_gpu_metrics() if gpu_metrics is None else gpu_metrics
     gpu_mem = gpu_raw.get("memory_used_mb")
     gpu_source = gpu_raw.get("source", "unavailable")
 
@@ -123,7 +123,7 @@ def build_unified_snapshot(
         system_section["sched_p50_us"] = p50_us
         system_section["sched_p95_us"] = p95_us
         system_section["sched_p99_us"] = p99_us
-        system_section["sched_preempt_count"] = unmatched
+        system_section["sched_unmatched_switch_count"] = unmatched
 
         sched_section = {
             "scope": sched_summary.get("scope", "system"),
@@ -131,7 +131,7 @@ def build_unified_snapshot(
             "p95_us": p95_us,
             "p99_us": p99_us,
             "mean_us": mean_us,
-            "preempt_count": unmatched,
+            "unmatched_switch_count": unmatched,
             "event_count": ev_count,
             "dropped_count": sched_summary.get("dropped_events_count", 0),
         }
@@ -157,6 +157,7 @@ def build_unified_snapshot(
         "pstate",
         "sm_clock_mhz",
         "mem_clock_mhz",
+        "pcie_tx_kb_per_s", "pcie_rx_kb_per_s", "gpu_index", "gpu_uuid",
     ):
         if k in gpu_raw and gpu_raw[k] is not None:
             gpu_section[k] = gpu_raw[k]

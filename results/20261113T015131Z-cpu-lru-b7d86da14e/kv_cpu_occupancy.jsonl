@@ -1,0 +1,7 @@
+{"monotonic_ns": 564143840734, "operation": "initialize", "capacity_blocks": 72, "occupied_blocks": 0, "evicted_blocks": 0, "run_id": "20261113T015131Z-cpu-lru-b7d86da14e"}
+{"monotonic_ns": 566426663374, "operation": "reserve_store", "capacity_blocks": 72, "occupied_blocks": 2, "evicted_blocks": 0, "run_id": "20261113T015131Z-cpu-lru-b7d86da14e"}
+{"monotonic_ns": 567169908695, "operation": "reserve_store", "capacity_blocks": 72, "occupied_blocks": 3, "evicted_blocks": 0, "run_id": "20261113T015131Z-cpu-lru-b7d86da14e"}
+{"monotonic_ns": 568075911814, "operation": "reserve_store", "capacity_blocks": 72, "occupied_blocks": 4, "evicted_blocks": 0, "run_id": "20261113T015131Z-cpu-lru-b7d86da14e"}
+{"monotonic_ns": 568277042444, "operation": "reserve_store", "capacity_blocks": 72, "occupied_blocks": 5, "evicted_blocks": 0, "run_id": "20261113T015131Z-cpu-lru-b7d86da14e"}
+{"monotonic_ns": 568515184738, "operation": "reserve_store", "capacity_blocks": 72, "occupied_blocks": 7, "evicted_blocks": 0, "run_id": "20261113T015131Z-cpu-lru-b7d86da14e"}
+{"monotonic_ns": 568724973414, "operation": "reserve_store", "capacity_blocks": 72, "occupied_blocks": 8, "evicted_blocks": 0, "run_id": "20261113T015131Z-cpu-lru-b7d86da14e"}

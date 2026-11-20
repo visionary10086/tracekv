@@ -40,7 +40,7 @@ BEGIN
 tracepoint:sched:sched_wakeup
 {
     if (@enqueue_ts[args.pid] == 0) {
-        @enqueue_ts[args.pid] = nsecs;
+        @enqueue_ts[args.pid] = nsecs(monotonic);
     } else {
         @dup_wakeup++;
     }
@@ -49,7 +49,7 @@ tracepoint:sched:sched_wakeup
 tracepoint:sched:sched_wakeup_new
 {
     if (@enqueue_ts[args.pid] == 0) {
-        @enqueue_ts[args.pid] = nsecs;
+        @enqueue_ts[args.pid] = nsecs(monotonic);
     } else {
         @dup_wakeup++;
     }
@@ -67,9 +67,10 @@ tracepoint:sched:sched_switch
 {
     $wakeup_ts = @enqueue_ts[args.next_pid];
     if ($wakeup_ts != 0) {
-        $latency = nsecs - $wakeup_ts;
+        $switch_ts = nsecs(monotonic);
+        $latency = $switch_ts - $wakeup_ts;
         printf("SCHED|%llu|%llu|%d|%d|%llu|%s\n",
-               nsecs, $wakeup_ts, args.next_pid, cpu, $latency,
+               $switch_ts, $wakeup_ts, args.next_pid, cpu, $latency,
                args.next_comm);
         delete(@enqueue_ts[args.next_pid]);
         @matched++;

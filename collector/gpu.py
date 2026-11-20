@@ -1,7 +1,7 @@
 """Real GPU memory, compute & PCIe telemetry sampler for NVIDIA GPUs (WSL2 / Linux).
 
 Supports two collection backends:
-1. Direct ctypes NVML (libnvidia-ml.so): zero-subprocess query (< 0.2ms) extracting
+1. Direct ctypes NVML (libnvidia-ml.so): zero-subprocess query (without a subprocess) extracting
    VRAM distribution, core compute %, memory bandwidth %, PCIe Tx/Rx throughput,
    temperature, power, clocks, and P-State.
 2. nvidia-smi CLI fallback: robust subprocess parsing with individual field fault tolerance.
@@ -22,6 +22,7 @@ import argparse
 import ctypes
 from datetime import datetime, timezone
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -85,7 +86,7 @@ class _NvmlDriver:
             return cls._instance
 
     def query_device(self, gpu_index: int = 0) -> dict[str, Any] | None:
-        """Query GPU metrics directly via NVML in < 0.2ms."""
+        """Query GPU metrics directly via NVML without spawning a subprocess."""
         if not self.initialized or self.lib is None:
             return None
 
@@ -194,7 +195,8 @@ def _parse_float(val: str | None) -> float | None:
     if not cleaned or cleaned.lower() in ("n/a", "[not supported]", "not supported", "[n/a]"):
         return None
     try:
-        return float(cleaned)
+        value = float(cleaned)
+        return value if math.isfinite(value) else None
     except ValueError:
         return None
 
@@ -286,9 +288,10 @@ def collect_gpu_metrics(
             check=False,
         )
         if proc.returncode != 0:
-            # Fallback to query without --id if specific index failed
+            # Retry fewer optional fields, preserving the requested device index.
             fallback_cmd = [
                 smi,
+                f"--id={gpu_index}",
                 "--query-gpu=memory.used,memory.total,utilization.gpu,temperature.gpu,power.draw",
                 "--format=csv,noheader,nounits",
             ]
@@ -315,6 +318,8 @@ def collect_gpu_metrics(
         if len(parts) >= 12:
             parsed_index = _parse_int(parts[0])
             eff_index = parsed_index if parsed_index is not None else gpu_index
+            if eff_index != gpu_index:
+                return base_unavailable
             uuid_str = _parse_str(parts[1])
             used_mib = _parse_float(parts[2])
             total_mib = _parse_float(parts[3])
@@ -329,6 +334,8 @@ def collect_gpu_metrics(
         elif len(parts) == 7:
             parsed_index = _parse_int(parts[0])
             eff_index = parsed_index if parsed_index is not None else gpu_index
+            if eff_index != gpu_index:
+                return base_unavailable
             uuid_str = _parse_str(parts[1])
             used_mib = _parse_float(parts[2])
             total_mib = _parse_float(parts[3])
@@ -528,7 +535,7 @@ def main() -> None:
 
     out_path = args.out or Path(f"results/{args.run_id}/gpu_samples.jsonl")
     duration = args.duration if args.duration > 0 else 2.0
-    backend = "NVML ctypes (<0.2ms)" if prefer_nvml else "nvidia-smi"
+    backend = "NVML ctypes (without a subprocess)" if prefer_nvml else "nvidia-smi"
     print(f"Monitoring GPU {args.gpu_index} via {backend} for {duration}s -> {out_path}")
     with GpuMonitor(
         args.run_id,

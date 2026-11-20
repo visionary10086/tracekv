@@ -1,0 +1,6 @@
+{"job_id": 0, "direction": "gpu_to_cpu", "gpu_blocks": 2, "submitted_ns": 566601825798, "observed_ns": 566612786655, "elapsed_ms": 10.960857, "status": "completed", "run_id": "20261113T015131Z-cpu-lru-b7d86da14e"}
+{"job_id": 1, "direction": "gpu_to_cpu", "gpu_blocks": 1, "submitted_ns": 567196646192, "observed_ns": 567200288834, "elapsed_ms": 3.642642, "status": "completed", "run_id": "20261113T015131Z-cpu-lru-b7d86da14e"}
+{"job_id": 2, "direction": "gpu_to_cpu", "gpu_blocks": 1, "submitted_ns": 568099200702, "observed_ns": 568103848126, "elapsed_ms": 4.647424, "status": "completed", "run_id": "20261113T015131Z-cpu-lru-b7d86da14e"}
+{"job_id": 3, "direction": "gpu_to_cpu", "gpu_blocks": 1, "submitted_ns": 568306957431, "observed_ns": 568312113724, "elapsed_ms": 5.156293, "status": "completed", "run_id": "20261113T015131Z-cpu-lru-b7d86da14e"}
+{"job_id": 4, "direction": "gpu_to_cpu", "gpu_blocks": 2, "submitted_ns": 568549335688, "observed_ns": 568558742063, "elapsed_ms": 9.406375, "status": "completed", "run_id": "20261113T015131Z-cpu-lru-b7d86da14e"}
+{"job_id": 5, "direction": "gpu_to_cpu", "gpu_blocks": 1, "submitted_ns": 568747645818, "observed_ns": 568752600346, "elapsed_ms": 4.954528, "status": "completed", "run_id": "20261113T015131Z-cpu-lru-b7d86da14e"}

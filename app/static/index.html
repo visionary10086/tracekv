@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TraceKV · Linux 监测平台</title><link rel="stylesheet" href="/static/style.css"></head>
+<body>
+<aside>
+<a class="brand" href="#overview"><span class="brand-icon">T</span>TraceKV<span class="version">0.2</span></a>
+<div class="nav-label">工作空间</div>
+<nav><a href="#overview" class="active">◈ <span>实时监测</span></a><a href="#experiment">⊞ <span>实验工作台</span></a><a href="#history">≡ <span>运行记录</span></a><a href="/docs" target="_blank">↗ <span>API 文档</span></a></nav>
+<div class="aside-bottom"><span class="dot"></span> Linux 原生运行<br><small>真实采样 · 可复现实验</small></div>
+</aside>
+<main>
+<header><div class="breadcrumb">工作空间 <span>/</span> 监测概览</div><div class="connection" id="connection">正在连接平台…</div></header>
+<section id="overview">
+<div class="section-top"><div><div class="eyebrow">INFERENCE OBSERVABILITY</div><h1>看见每一次推理背后的资源变化。</h1><p>系统、GPU 与 KV Cache 的实时监测和实验记录。</p></div><div class="live-badge"><span class="dot"></span> LIVE <span id="sample-time">等待采样</span></div></div>
+<div id="error" class="error" role="alert" hidden></div>
+<div class="metrics">
+<article class="metric"><div>GPU 显存占用 <span class="tag">整卡 · GPU 0</span></div><div class="value" id="gpu-value">—<small>MB</small></div><div class="meter"><i id="gpu-meter"></i></div><small id="gpu-note">等待 NVIDIA 采样</small></article>
+<article class="metric"><div>可用系统内存 <span class="tag">整机</span></div><div class="value" id="memory-value">—<small>GB</small></div><small>Linux /proc/meminfo</small></article>
+<article class="metric"><div>KV Cache 使用率 <span class="tag">vLLM</span></div><div class="value" id="kv-value">—<small>%</small></div><div class="meter purple"><i id="kv-meter"></i></div><small>未连接推理服务时不产生数值</small></article>
+<article class="metric"><div>窗口前缀命中率 <span class="tag">计数器差分</span></div><div class="value" id="hit-value">—<small>%</small></div><small id="running-note">活跃请求：—</small></article>
+</div>
+<div class="chart-grid">
+<article class="panel"><div class="panel-head"><div><h2>资源时间线</h2><p>最近 180 次采样 · 无数据时保留空白</p></div><div class="legend"><span class="mint">● GPU 显存 MB</span><span class="blue">● 可用内存 MB</span></div></div><canvas id="resource-chart" aria-label="GPU 显存和系统可用内存时间线" role="img"></canvas></article>
+<article class="panel"><div class="panel-head"><div><h2>KV Cache 时间线</h2><p>各值对应实际采样窗口</p></div><div class="legend"><span class="purple-text">● 使用率 %</span><span class="mint">● 命中率 %</span></div></div><canvas id="kv-chart" aria-label="KV 缓存使用率和命中率时间线" role="img"></canvas></article>
+</div>
+<article class="panel sources"><div><h2>采集链路</h2><p>缺失和失败会明确标注，整机指标不归因到单条请求。</p></div><div id="sources"></div></article>
+</section>
+<section id="experiment">
+<div class="section-title"><div class="eyebrow">EXPERIMENT WORKSPACE</div><h2>实验工作台</h2><p>选择本地模型，一次运行自动管理服务、请求、采集与报告。</p></div>
+<div class="workspace">
+<form class="panel" id="run-form">
+<div class="panel-head"><h3>新建实验</h3><span class="tag">vLLM 0.11.2</span></div>
+<div class="form-grid">
+<label class="wide">本地模型<select id="model" required></select></label>
+<label>工作负载<select id="workload" required></select></label>
+<label>缓存策略<select id="policy"><option value="gpu_only">GPU only · 基础对照</option><option value="cpu_lru">CPU LRU · 缓存卸载</option></select></label>
+<label>正式请求数<input id="requests" type="number" min="1" max="10000" value="6" required></label>
+<label>并发数<input id="concurrency" type="number" min="1" max="4" value="1" required></label>
+<label>预热请求数<input id="warmup" type="number" min="0" max="100" value="1" required></label>
+<label>最大生成 token<input id="max-tokens" type="number" min="1" max="512" value="32" required></label>
+<label>GPU KV 块预算<input id="gpu-blocks" type="number" min="1" max="100000" value="64" required></label>
+<label>CPU KV 块预算<input id="cpu-blocks" type="number" min="0" max="100000" value="0" disabled required></label>
+</div>
+<p class="form-note">每次启动独立模型服务，先预热后测量；不重置每条请求的缓存。端口占用时实验失败并保留日志。</p>
+<div class="form-actions"><button class="primary" type="submit" id="start-button">＋ 启动实验</button><span id="launch-message" role="status"></span></div>
+</form>
+<article class="panel current">
+<div class="panel-head"><h3>当前运行</h3><span class="pill" id="job-status">空闲</span></div>
+<div class="current-icon">⌁</div><h3 id="job-phase">准备好开始实验</h3><code id="job-id">启动后自动生成 run_id</code>
+<div class="progress"><i id="job-progress"></i></div><p id="job-detail">请求、快照、配置与报告将保存在同一结果目录。</p>
+<div class="current-actions"><button id="stop-button" class="secondary" disabled>停止实验</button><button id="inspect-button" class="secondary" disabled>查看产物 ↗</button></div>
+<div class="scope-note"><strong>本版接入范围</strong><p>GPU、内存、vLLM KV 指标和真实请求。eBPF 调度追踪尚未接入此界面。</p></div>
+</article>
+</div>
+</section>
+<section id="history">
+<div class="section-title"><div class="eyebrow">RUN ARCHIVE</div><h2>运行记录</h2><p>每次实验都有独立 ID、原始文件和可检查的报告。</p></div>
+<article class="panel history"><div class="table-scroll"><table><thead><tr><th>RUN ID / UTC</th><th>策略</th><th>状态</th><th>已记录 / 计划</th><th></th></tr></thead><tbody id="run-list"><tr><td colspan="5" class="empty">暂无实验记录。从上方启动第一次实验。</td></tr></tbody></table></div></article>
+</section>
+<footer>TraceKV / Linux 监测平台 <span>整卡遥测与统计关联不等于逐请求因果关系。</span></footer>
+</main>
+<dialog id="detail"><div class="dialog-head"><h2>实验详情</h2><button id="close-detail" class="secondary" aria-label="关闭实验详情">关闭 ×</button></div><code id="detail-id"></code><div id="detail-metrics" class="detail-metrics"></div><h3>实验产物</h3><div id="artifacts"></div><h3>状态与限制</h3><pre id="detail-text"></pre></dialog>
+<script src="/static/app.js" defer></script>
+</body></html>

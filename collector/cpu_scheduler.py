@@ -206,6 +206,18 @@ def compute_stats(latencies_ns: list[int]) -> CollectorStats:
 # JSONL formatting
 # ---------------------------------------------------------------------------
 
+def _target_scope(target_pids, target_comm):
+    if target_pids is not None:
+        return "target_threads"
+    return "comm_match" if target_comm is not None else "system"
+
+
+def _matches_target(event, target_pids, target_comm):
+    return (target_pids is not None or target_comm is not None) and (
+        target_pids is None or event.tid in target_pids
+    ) and (target_comm is None or event.comm == target_comm)
+
+
 def event_to_jsonl(
     event: SchedEvent,
     run_id: str,
@@ -213,21 +225,11 @@ def event_to_jsonl(
     target_comm: str | None = None,
 ) -> str:
     """Serialize one event to a JSON line (no trailing newline)."""
-    pid_val: int | None = None
-    is_target: bool | None = None
-
-    if target_pids is not None:
-        if event.tid in target_pids:
-            is_target = True
-            pid_val = event.tid
-        else:
-            is_target = False
-    elif target_comm is not None:
-        if event.comm == target_comm:
-            is_target = True
-            pid_val = event.tid
-        else:
-            is_target = False
+    # sched_switch supplies a TID and comm, not the process TGID.
+    pid_val = None
+    is_target = _matches_target(event, target_pids, target_comm) if (
+        target_pids is not None or target_comm is not None
+    ) else None
 
     payload = {
         "schema_version": 1,
@@ -254,7 +256,7 @@ def stats_to_dict(result: CollectorResult) -> dict:
     """Build a serializable summary dictionary conforming to v0.2 contract.
 
     Notes on metric semantics per docs/联调接口规范_v0.2.md:
-    - scope: "system" for unconstrained tracing, "target_process" if filtered.
+    - scope: system, target_threads (TID filter), or comm_match (thread name).
     - unmatched_switch_count: switch-ins without observed wakeup event (unpartnered).
     - dropped_events_count: reconciliation discrepancy between kernel matched count
       and userspace parsed events.
@@ -265,12 +267,14 @@ def stats_to_dict(result: CollectorResult) -> dict:
         "run_id": result.run_id,
         "source": "ebpf_sched",
         "scope": result.scope,
+        "selection_semantics": "target_pids are TID filters; comm is name matching, not process identity",
         "metric": "wakeup_to_run_latency_summary",
         "start_wall_ns": result.start_anchor.wall_ns,
         "start_monotonic_ns": result.start_anchor.monotonic_ns,
         "event_count": s.event_count,
         "kernel_matched_count": s.kernel_matched_count,
-        "dropped_events_count": s.dropped_events_count,
+        "dropped_events_count": s.dropped_events_count if s.kernel_matched_count is not None else None,
+        "loss_reconciliation_available": s.kernel_matched_count is not None,
         "unmatched_switch_count": s.unmatched_switch_count,
         "duplicate_wakeup_count": s.duplicate_wakeup_count,
         "exit_cleanup_count": s.exit_cleanup_count,
@@ -292,7 +296,7 @@ def stats_to_dict(result: CollectorResult) -> dict:
         d["target_pids"] = result.target_pids
     if result.target_comm is not None:
         d["target_comm"] = result.target_comm
-    if result.scope == "target_process" and result.target_stats is not None:
+    if result.scope != "system" and result.target_stats is not None:
         ts = result.target_stats
         d["event_count"] = ts.event_count
         d["min_ns"] = ts.min_ns
@@ -343,7 +347,7 @@ def process_stream(
     text stream, making it easy to test with synthetic data.
     """
     anchor = TimeAnchor(wall_ns=time.time_ns(), monotonic_ns=time.monotonic_ns())
-    scope = "target_process" if (target_pids is not None or target_comm is not None) else "system"
+    scope = _target_scope(target_pids, target_comm)
     result = CollectorResult(
         run_id=run_id,
         start_anchor=anchor,
@@ -353,7 +357,7 @@ def process_stream(
     )
     sample_reservoir: list[int] = []
     target_reservoir: list[int] = []
-    target_stats = CollectorStats() if scope == "target_process" else None
+    target_stats = CollectorStats() if scope != "system" else None
     target_seen_tids: set[int] = set()
 
     rng = random.Random(random_seed) if random_seed is not None else random.Random()
@@ -407,11 +411,7 @@ def process_stream(
                     sample_reservoir[j] = event.latency_ns
 
             # Target process filtering
-            is_target = False
-            if target_pids_set is not None and event.tid in target_pids_set:
-                is_target = True
-            elif target_comm is not None and event.comm == target_comm:
-                is_target = True
+            is_target = _matches_target(event, target_pids_set, target_comm)
 
             if is_target and target_stats is not None:
                 target_stats.event_count += 1
@@ -575,11 +575,11 @@ def run_collector(
     kernel_build:
         Override BPFTRACE_KERNEL_BUILD directory.
     target_pid:
-        Single target PID to filter (sets scope="target_process").
+        Single target thread ID (legacy parameter name); does not expand to all process threads.
     target_pids:
-        List of target PIDs to filter (sets scope="target_process").
+        List of target thread IDs (legacy parameter name).
     target_comm:
-        Target process command name to filter (sets scope="target_process").
+        Thread command name to match; this does not prove process identity.
 
     Returns
     -------
@@ -597,7 +597,7 @@ def run_collector(
             start_anchor=anchor,
             end_anchor=anchor,
             error="bpftrace not found in PATH",
-            scope="target_process" if (target_pids or target_comm) else "system",
+            scope=_target_scope(target_pids, target_comm),
             target_pids=target_pids,
             target_comm=target_comm,
         )
@@ -628,7 +628,7 @@ def run_collector(
         env["BPFTRACE_KERNEL_BUILD"] = str(resolved_build)
 
     anchor = TimeAnchor(wall_ns=time.time_ns(), monotonic_ns=time.monotonic_ns())
-    scope = "target_process" if (target_pids or target_comm) else "system"
+    scope = _target_scope(target_pids, target_comm)
     result = CollectorResult(
         run_id=run_id,
         start_anchor=anchor,
@@ -812,9 +812,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--kernel-build", type=Path, default=None,
                         help="Override BPFTRACE_KERNEL_BUILD directory")
     parser.add_argument("--pid", type=int, default=None,
-                        help="Target process PID to isolate scheduler latency")
+                        help="Target TID (legacy --pid option; does not include all process threads)")
     parser.add_argument("--comm", type=str, default=None,
-                        help="Target process command name (comm) to isolate scheduler latency")
+                        help="Thread name match (comm); does not establish process identity")
     args = parser.parse_args(argv)
 
     print(f"Starting scheduler latency collector (run_id={args.run_id}, duration={args.duration}s)",
