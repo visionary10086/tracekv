@@ -85,6 +85,40 @@ class PlatformTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 jobs.resolve("symlink")
 
+    def test_cli_and_supervisor_share_validated_run_directory_creation(self):
+        from tools.run_experiment import create_run
+        with tempfile.TemporaryDirectory() as folder:
+            cfg = {"model_path": folder, "workload_path": str(ROOT / "workloads/smoke.jsonl")}
+            first, manifest = create_run(cfg, Path(folder) / "runs")
+            second, other = create_run(cfg, Path(folder) / "runs")
+            self.assertNotEqual(first.name, second.name)
+            self.assertEqual(first.name, manifest["run_id"])
+            self.assertEqual(other["config"], manifest["config"])
+            self.assertEqual(json.loads((first / "manifest.json").read_text()), manifest)
+            self.assertTrue((first / "logs").is_dir())
+
+    def test_rich_monitor_and_report_preserve_source_coverage(self):
+        sample = Monitor().sample()
+        self.assertIn("cpu", sample["system"])
+        self.assertIn("psi", sample["system"])
+        self.assertEqual(sample["gpu"]["run_id"], sample["run_id"])
+        with tempfile.TemporaryDirectory() as folder:
+            out = Path(folder)
+            manifest = {"run_id": "report-test", "status": "failed",
+                        "config": {"policy": "gpu_only", "requests": 3, "sample_interval_ms": 1000},
+                        "sources": {"sched": {"status": "unavailable"}}}
+            write_json(out / "manifest.json", manifest)
+            append_json(out / "snapshots.jsonl", sample)
+            analyze(out)
+            summary = json.loads((out / "summary.json").read_text())
+            diag = json.loads((out / "bottleneck_diagnosis.json").read_text())
+            self.assertEqual(summary["run_id"], "report-test")
+            self.assertEqual(diag["run_id"], "report-test")
+            self.assertFalse(diag["causality_established"])
+            self.assertEqual(diag["source_coverage"]["sched"], 0)
+            self.assertEqual(summary["status"], "failed")
+            self.assertIn("bottleneck_diagnosis.json", (out / "report.md").read_text())
+
     def test_fixed_boundary_sample_not_dropped_and_missing_window_is_null(self):
         with tempfile.TemporaryDirectory() as folder:
             out = Path(folder)

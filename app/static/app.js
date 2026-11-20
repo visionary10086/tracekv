@@ -26,8 +26,18 @@ function renderLive() {
   $("kv-meter").style.width = s.kv.usage_ratio == null ? "0" : Math.min(100,s.kv.usage_ratio*100)+"%";
   $("gpu-note").textContent = s.gpu.memory_total_mb ? "总计 "+s.gpu.memory_total_mb.toFixed(0)+" MB · 利用率 "+(s.gpu.utilization_pct ?? "—")+"%" : "GPU 数据不可用";
   $("running-note").textContent = "活跃请求："+(s.kv.running_requests ?? "—");
+  const cpu = s.system.cpu || {}, psi = s.system.psi || {}, io = s.system.io || {};
+  const format = (n, digits=1) => Number.isFinite(n) ? n.toFixed(digits) : "—";
+  value("cpu-value",cpu.utilization_pct,"%");
+  value("pressure-value",psi.psi_cpu_some_avg10,"%");
+  value("io-value",io.read_bytes_per_s == null ? null : io.read_bytes_per_s/1e6,"MB/s",2);
+  value("pcie-value",s.gpu.pcie_rx_kb_per_s == null ? null : s.gpu.pcie_rx_kb_per_s/1000,"MB/s",2);
+  $("cpu-note").textContent = "I/O wait "+format(cpu.iowait_pct)+"% · 1 分钟负载 "+format(cpu.loadavg_1m,2);
+  $("pressure-note").textContent = "内存 PSI "+format(psi.psi_mem_some_avg10)+"% · I/O PSI "+format(psi.psi_io_some_avg10)+"%";
+  $("io-note").textContent = "写入 "+format(io.write_bytes_per_s == null ? null : io.write_bytes_per_s/1e6,2)+" MB/s";
+  $("pcie-note").textContent = "发送 "+format(s.gpu.pcie_tx_kb_per_s == null ? null : s.gpu.pcie_tx_kb_per_s/1000,2)+" MB/s · 周期采样可能遗漏突发";
   $("sources").replaceChildren();
-  const labels = {system:"系统内存",gpu:"GPU 遥测",kv:"vLLM 指标",sched:"eBPF 调度"};
+  const labels = {system:"系统遥测",gpu:"GPU 遥测",kv:"vLLM 指标",sched:"eBPF 调度"};
   for (const [key,status] of Object.entries(s.source_status)) {
     const item=document.createElement("span"); item.className="source-item "+status.status;
     item.title=status.error || "正常采集"; item.append(document.createElement("b"),document.createTextNode(labels[key]+" · "+({ok:"正常",failed:"失败",unavailable:"未接入"}[status.status] || status.status)));
@@ -43,7 +53,7 @@ function chart(id, series, maxValue) {
   const w=box.width,h=box.height,pad={l:45,r:12,t:12,b:28};
   const values=series.flatMap(s=>history.map(s.get)).filter(Number.isFinite);
   const max=maxValue || Math.max(1,...values)*1.12;
-  ctx.font="9px Segoe UI"; ctx.fillStyle="#72899b"; ctx.strokeStyle="#23303d"; ctx.lineWidth=1;
+  ctx.font="12px Segoe UI"; ctx.fillStyle="#72899b"; ctx.strokeStyle="#23303d"; ctx.lineWidth=1;
   for(let i=0;i<5;i++){
     const y=pad.t+(h-pad.t-pad.b)*i/4;
     ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(w-pad.r,y);ctx.stroke();
@@ -90,7 +100,7 @@ async function renderRuns(){
     for(const text of [run.run_id,run.config.policy]){const td=document.createElement("td");td.textContent=text;tr.append(td);}
     const status=document.createElement("td");status.append(pill(run.status));tr.append(status);
     const count=document.createElement("td");count.textContent=(run.recorded_requests||0)+" / "+run.config.requests;tr.append(count);
-    const action=document.createElement("td"),button=document.createElement("button");button.className="secondary";button.textContent="查看详情 ↗";button.onclick=()=>inspect(run.run_id);action.append(button);tr.append(action);$("run-list").append(tr);
+    const action=document.createElement("td"),button=document.createElement("button");button.className="secondary";button.textContent="查看详情";button.onclick=()=>inspect(run.run_id);action.append(button);tr.append(action);$("run-list").append(tr);
   }
 }
 async function inspect(id){
@@ -100,6 +110,18 @@ async function inspect(id){
     for(const filename of data.artifacts){const a=document.createElement("a");a.textContent=filename;a.href="/api/v1/runs/"+encodeURIComponent(id)+"/files/"+filename;a.target="_blank";$("artifacts").append(a);}
     if(data.summary)for(const [label,key] of [["成功请求","successful_requests"],["TTFT P95 / ms","client_ttft_ms_p95"],["E2E P95 / ms","client_e2e_ms_p95"]]){
       const el=document.createElement("span"),n=data.summary[key];el.textContent=label+"："+(Number.isFinite(n)?Number(n.toFixed(2)):"—");$("detail-metrics").append(el);
+    }
+    const diagnosisNames = {
+      HOST_SCHEDULING_CONTENTION:"CPU 调度压力偏高", SYSTEM_MEMORY_IO_PRESSURE:"系统内存或 I/O 压力偏高",
+      GPU_HIGH_UTILIZATION:"GPU 活动水平较高", HIGH_PCIE_UTILIZATION:"PCIe 采样流量较高",
+      NO_RULE_TRIGGERED:"当前可用指标未触发调查规则", INSUFFICIENT_DATA:"缺少判断所需的有效指标"
+    };
+    $("diagnosis").hidden = !data.diagnosis;
+    if(data.diagnosis){
+      $("diagnosis-title").textContent=diagnosisNames[data.diagnosis.primary_bottleneck] || data.diagnosis.primary_bottleneck;
+      $("diagnosis-note").textContent="这是待验证的调查提示。整机指标与时间相关性不能证明请求变慢的原因，未采到的指标也不能说明系统正常。";
+      const counts=data.diagnosis.source_coverage || {};
+      $("diagnosis-coverage").textContent="有效采样数：GPU "+(counts.gpu??0)+" · CPU PSI "+(counts.psi_cpu??0)+" · 调度 "+(counts.sched??0);
     }
     $("detail-text").textContent=JSON.stringify(data.analysis || data.manifest,null,2);
     if(!$("detail").open)$("detail").showModal();

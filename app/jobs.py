@@ -8,12 +8,13 @@ import sys
 import threading
 
 from contracts.schema import utc_now
-from tools.run_experiment import ROOT, run_id, validate_config, write_json
+from tools.run_experiment import ROOT, create_run, validate_config, write_json
 
 ARTIFACTS = {
     "manifest.json", "requests.jsonl", "request_summary.json", "analysis.json", "warmup.jsonl",
     "report.md", "snapshots.jsonl", "aligned_snapshots.jsonl", "kv_samples.jsonl",
     "gpu_samples.jsonl", "system_samples.jsonl", "kv_transfers.jsonl", "kv_cpu_occupancy.jsonl",
+    "summary.json", "bottleneck_diagnosis.json",
     "logs/runner.log", "logs/server-launcher.log", "server/server.log",
 }
 
@@ -49,18 +50,8 @@ class Jobs:
                 raise RuntimeError("An experiment is already running")
             if sys.platform != "linux":
                 raise ValueError("Start experiments from Linux")
-            name = run_id(cfg["policy"])
-            self.root.mkdir(parents=True, exist_ok=True)
-            out = self.root / name
-            out.mkdir(exist_ok=False)
-            (out / "logs").mkdir()
-            manifest = {
-                "schema_version": 1, "run_id": name, "comparison_id": None,
-                "status": "running", "phase": "queued", "created_at_utc": utc_now(),
-                "config": cfg, "recorded_requests": 0,
-                "sources": {"sched": {"status": "unavailable", "error": "Not connected in this milestone"}},
-            }
-            write_json(out / "manifest.json", manifest)
+            out, manifest = create_run(cfg, self.root)
+            name = manifest["run_id"]
             try:
                 with (out / "logs/runner.log").open("w") as log:
                     self.process = subprocess.Popen(

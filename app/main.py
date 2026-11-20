@@ -107,7 +107,7 @@ def get_run(run_id: str):
         out = jobs.resolve(run_id)
         manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
         result = {"manifest": manifest, "artifacts": [name for name in sorted(ARTIFACTS) if (out / name).is_file()]}
-        for key, filename in (("analysis", "analysis.json"), ("summary", "request_summary.json")):
+        for key, filename in (("analysis", "analysis.json"), ("summary", "request_summary.json"), ("diagnosis", "bottleneck_diagnosis.json")):
             if (out / filename).is_file():
                 result[key] = json.loads((out / filename).read_text(encoding="utf-8"))
         return result

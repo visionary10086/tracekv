@@ -5,7 +5,7 @@ import time
 from collections import deque
 from uuid import uuid4
 
-from collector.demo import collect_system_metrics
+from collector.system import collect_system_sample
 from collector.gpu import collect_gpu_metrics
 from contracts.schema import utc_now, validate_snapshot
 from engine.vllm_adapter import VllmAdapter
@@ -20,16 +20,18 @@ class Monitor:
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
         self.thread = None
+        self.system_state = None
 
     def sample(self):
-        system = collect_system_metrics()
-        gpu = collect_gpu_metrics()
+        system, self.system_state = collect_system_sample(
+            run_id=self.run_id, prev_state=self.system_state, return_state=True)
+        gpu = collect_gpu_metrics(run_id=self.run_id)
         kv = dict(usage_ratio=None, prefix_hit_ratio=None, running_requests=None)
         statuses = {
             "system": {"status": "ok" if system["source"] != "unavailable" else "unavailable",
                        "error": None if system["source"] != "unavailable" else "/proc/meminfo unavailable"},
             "gpu": {"status": "ok" if gpu["source"] != "unavailable" else "unavailable",
-                    "error": None if gpu["source"] != "unavailable" else "nvidia-smi unavailable or unsupported query"},
+                    "error": None if gpu["source"] != "unavailable" else "GPU telemetry unavailable or unsupported"},
             "kv": {"status": "unavailable", "error": "vLLM metrics URL not configured"},
             "sched": {"status": "unavailable", "error": "eBPF live collection not connected in this milestone"},
         }
@@ -50,7 +52,7 @@ class Monitor:
             "schema_version": "0.1", "run_id": self.run_id,
             "timestamp": utc_now(),
             "window_ms": self.adapter.last_window_ms if self.adapter and self.adapter.last_window_ms else int(self.interval * 1000),
-            "system": {key: system[key] for key in ("mem_available_mb", "disk_read_p95_ms", "disk_read_bytes_per_s")},
+            "system": {key: value for key, value in system.items() if key not in ("run_id", "timestamp", "source")},
             "gpu": gpu, "kv": kv,
             "sources": {"system": system["source"], "gpu": gpu["source"],
                         "kv": "vllm" if statuses["kv"]["status"] == "ok" else "unavailable"},

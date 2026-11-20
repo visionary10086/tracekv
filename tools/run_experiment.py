@@ -17,6 +17,7 @@ import time
 from uuid import uuid4
 
 from app.monitor import Monitor
+from collector.correlator import diagnose_system_bottlenecks
 from contracts.schema import utc_now
 from tools.benchmark import get_resource, load_cases, request_one, summarize
 
@@ -85,6 +86,26 @@ def validate_config(config):
     load_cases(workload)
     return cfg
 
+
+
+def create_run(config, result_root):
+    """Create one validated, isolated experiment, shared by CLI and web API."""
+    cfg = validate_config(config)
+    root = Path(result_root).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    name = run_id(cfg["policy"])
+    out = root / name
+    out.mkdir(exist_ok=False)
+    (out / "logs").mkdir()
+    manifest = {
+        "schema_version": 1, "run_id": name, "comparison_id": None,
+        "status": "running", "phase": "queued", "created_at_utc": utc_now(),
+        "config": cfg, "recorded_requests": 0,
+        "sources": {"sched": {"status": "unavailable",
+                              "error": "Live eBPF collection not yet connected"}},
+    }
+    write_json(out / "manifest.json", manifest)
+    return out, manifest
 
 def stop_server(server):
     if server is None:
@@ -157,7 +178,17 @@ def analyze(out):
     analysis = {"run_id": manifest["run_id"], "status": manifest["status"],
                 "summary": summary, "source_status": manifest.get("sources", {}),
                 "limitations": limits, "error": manifest.get("error")}
+    diagnosis = diagnose_system_bottlenecks(samples)
+    diagnosis["run_id"] = manifest["run_id"]
+    analysis["diagnosis"] = diagnosis
+    write_json(out / "bottleneck_diagnosis.json", diagnosis)
     write_json(out / "analysis.json", analysis)
+    write_json(out / "summary.json", {
+        "run_id": manifest["run_id"], "status": manifest["status"],
+        "config": manifest["config"], "requests": summary,
+        "source_status": manifest.get("sources", {}),
+        "diagnosis": diagnosis, "limitations": limits,
+    })
     lines = ["# TraceKV 实验报告", "", f"- run_id: {manifest['run_id']}",
              f"- 状态: {manifest['status']}", f"- 策略: {manifest['config']['policy']}",
              "- 缓存准备: 新服务启动后执行固定工作负载预热；未逐请求重置缓存。",
@@ -169,7 +200,19 @@ def analyze(out):
              f"- 错误: {manifest.get('error') or '无'}",
              "- 短负载结果仅用于链路验收；小样本分位数不能作为性能收益结论。", "", "## 数据与限制", ""]
     lines += ["- " + item for item in limits]
-    lines += ["", "原始请求见 requests.jsonl；实时快照见 snapshots.jsonl；窗口结果见 aligned_snapshots.jsonl。"]
+    lines += ["", "## 调查提示", "",
+              "- 提示类型: " + diagnosis["primary_bottleneck"],
+              "- " + diagnosis["summary"],
+              "- 以上为阈值调查提示，未建立因果关系；缺失指标不能说明系统正常。",
+              "- 规则阈值未经过瓶颈分类准确率校准。",
+              "- 有效采样数: " + json.dumps(diagnosis["source_coverage"], ensure_ascii=False),
+              "", "## 可追溯文件", "",
+              "- 配置与进程记录: manifest.json",
+              "- 请求与统计: requests.jsonl、request_summary.json",
+              "- 原始采样与窗口结果: snapshots.jsonl、aligned_snapshots.jsonl",
+              "- 调查依据: bottleneck_diagnosis.json",
+              "- 统一结果清单: summary.json"]
+
     (out / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return analysis
 
@@ -309,6 +352,7 @@ def execute(out, cfg):
                 except Exception as exc:
                     manifest["sampling_error"] = str(exc)
 
+        sample()  # Ensure even a short measurement has an in-window observation.
         sampling_thread = threading.Thread(target=sampling, daemon=True)
         sampling_thread.start()
 
@@ -393,12 +437,27 @@ def execute(out, cfg):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--run-dir", type=Path, required=True)
+    entry = parser.add_mutually_exclusive_group(required=True)
+    entry.add_argument("--run-dir", type=Path, help="Existing run directory")
+    entry.add_argument("--config", type=Path, help="JSON experiment configuration; creates a new run_id")
+    parser.add_argument("--results-dir", type=Path, default=ROOT / "results")
     parser.add_argument("--analyze-only", action="store_true")
     args = parser.parse_args()
     if args.analyze_only:
+        if args.config:
+            parser.error("--analyze-only requires --run-dir")
         analyze(args.run_dir)
         return 0
+    if args.config:
+        try:
+            config = json.loads(args.config.read_text(encoding="utf-8"))
+            if not isinstance(config, dict):
+                raise ValueError("Configuration must be a JSON object")
+            args.run_dir, manifest = create_run(config, args.results_dir)
+        except (OSError, ValueError) as exc:
+            parser.error(str(exc))
+        print(json.dumps({"run_id": manifest["run_id"], "result_dir": str(args.run_dir)},
+                         ensure_ascii=False), flush=True)
     data = json.loads((args.run_dir / "manifest.json").read_text())
     return execute(args.run_dir, validate_config(data["config"]))
 

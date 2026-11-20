@@ -1,0 +1,7 @@
+{
+  "policy": "cpu_lru",
+  "cpu_kv_blocks": 72,
+  "requests": 3,
+  "max_tokens": 16,
+  "sample_interval_ms": 500
+}
