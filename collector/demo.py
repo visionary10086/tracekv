@@ -1,28 +1,17 @@
 """Real Linux available-memory sample; eBPF disk fields await collector integration."""
 import json
-from pathlib import Path
-
-from contracts.schema import utc_now
+from collector.system import collect_system_sample
 
 
 def collect_system_metrics(meminfo_path="/proc/meminfo"):
     """Return one sample; MB means decimal megabytes (1,000,000 bytes)."""
-    available = None
-    source = "unavailable"
-    try:
-        for line in Path(meminfo_path).read_text().splitlines():
-            if line.startswith("MemAvailable:"):
-                available = round(int(line.split()[1]) * 1024 / 1_000_000, 3)
-                source = "proc"
-                break
-    except (OSError, ValueError, IndexError):
-        pass
+    s = collect_system_sample(run_id="", meminfo_path=meminfo_path)
     return {
-        "timestamp": utc_now(),
-        "mem_available_mb": available,
-        "disk_read_p95_ms": None,
-        "disk_read_bytes_per_s": None,
-        "source": source,
+        "timestamp": s["timestamp"],
+        "mem_available_mb": s["mem_available_mb"],
+        "disk_read_p95_ms": s["disk_read_p95_ms"],
+        "disk_read_bytes_per_s": s["disk_read_bytes_per_s"],
+        "source": s["source"],
     }
 
 

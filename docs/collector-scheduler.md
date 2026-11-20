@@ -203,3 +203,19 @@ sudo python3 -m collector.cpu_scheduler \
 1. **`pid`（TGID）字段**：暂保留为 `null`，避免在 bpftrace 简易脚本中猜测。后续版本如需获取完整 TGID，可通过 C 版本的 libbpf `bpf_get_current_pid_tgid()` 安全获取。
 2. **测量范围边界**：当前专注测量阻塞唤醒至就绪运行（Sleep-to-Run）耗时。计算密集型时间片抢占（Preempt-to-Run）暂计入 `unmatched_switch`，计划在第二迭代通过捕获 `prev_state == 0` 纳入统一调度队列延迟。
 3. **目标进程白名单**：首版为系统全量采样。高吞吐生产环境下可增加 PID 过滤以进一步降低开销。
+
+
+## v0.2 整合校正（2026-11-20）
+
+- 事件只测量已观察到的 wakeup→switch 区间，不包含所有 runnable 等待；未匹配的 switch 不是抢占次数。统一快照使用 sched_unmatched_switch_count / unmatched_switch_count。
+- bpftrace 明确使用 nsecs(monotonic)，与 Python time.monotonic_ns() 锚点一致。没有 UTC 锚点的事件不参加跨层对齐。
+- 历史参数 target_pids / --pid 实际按 TID 过滤，范围为 target_threads；comm 匹配范围为 comm_match。两种条件同时指定时取交集。事件没有 TGID 证据时 pid 保留 null，不声称覆盖整个模型进程。
+- 丢失数仅在得到内核 matched 计数时进行差值核对；否则输出 null。该差值也不能证明所有内核事件均无遗漏。
+- 最后一个整窗口边界上的样本保留到下一窗口；空窗口不延续旧值。KV 计数器差分比例保留各自区间，不对比例做无权平均。
+- 时滞分析输出 temporal_direction、有效配对数和 causality_established=false，保留缺失窗口的位置；常量序列相关系数为 null。
+- PCIe 实测零值与不支持的 null 分开。未提供明确容量参考时不计算容量比；不默认设备是 PCIe 4.0 x16。
+- NVML PCIe 查询覆盖短硬件区间，周期采样可能遗漏突发，不能用作逐 KV 作业精确字节核算。提交至观察完成的间隔包含排队及轮询，不是纯 DMA 时间。
+- 诊断为静态阈值调查提示，不是已验证瓶颈或因果结论；GPU 高利用率也不能单独证明计算受限。
+- 系统磁盘速率只汇总受支持的完整磁盘，避免分区重复统计；读取失败保留 null。进程 stat 正确处理含空格的 comm，状态速率使用单调时钟。
+
+依据：[NVML PCIe API](https://docs.nvidia.com/deploy/nvml-api/latest/api/group__nvmlDeviceQueries.html)、[bpftrace 时钟文档](https://bpftrace.org/docs/0.21)、[Linux I/O 统计](https://cdn.kernel.org/doc/html/latest/admin-guide/iostats.html)。
