@@ -684,5 +684,103 @@ class TestP0Fixes(unittest.TestCase):
             os.unlink(fname)
 
 
+class TestUnifiedSchedulerAndCorrelator(unittest.TestCase):
+    def test_process_stream_oncpu_event(self):
+        from collector.cpu_scheduler import process_stream
+        import io
+        lines = [
+            "CLOCK|1700000000000000000|1000000000\n",
+            "ONCPU|1000050000|1234|0|50000|python3\n",
+            "STAT|matched|1\n",
+            "STAT|oncpu_matched|1\n",
+        ]
+        out = io.StringIO()
+        res = process_stream(
+            lines,
+            output=out,
+            run_id="test-oncpu",
+            target_pids=[1234],
+        )
+        self.assertEqual(res.stats.oncpu_event_count, 1)
+        records = [json.loads(line) for line in out.getvalue().splitlines()]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["metric"], "on_cpu")
+        self.assertEqual(records[0]["value"], 50000)
+        self.assertEqual(records[0]["tid"], 1234)
+        self.assertTrue(records[0]["is_target"])
+
+    def test_correlator_ingests_runwait_and_oncpu(self):
+        from collector.correlator import generate_aligned_snapshots
+        from pathlib import Path
+        import tempfile, os
+        wall_anchor = 1_700_000_000_000_000_000
+        mono_anchor = 1_000_000_000
+        records = [
+            {"metric": "runnable_wait", "timestamp_ns": mono_anchor + 10_000_000, "value": 1500000, "is_target": True},
+            {"metric": "on_cpu", "timestamp_ns": mono_anchor + 20_000_000, "value": 3000000, "is_target": True},
+            {"metric": "direct_reclaim", "timestamp_ns": mono_anchor + 30_000_000, "value": 25000000, "is_target": False},
+        ]
+        summary = {
+            "kernel_clock_anchor": {"wall_ns": wall_anchor, "monotonic_ns": mono_anchor},
+            "scope": "target_threads",
+            "p50_us": 10.0,
+            "p95_us": 20.0,
+            "p99_us": 30.0,
+            "loss_pct": 0.0,
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f_ev, \
+             tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f_sum:
+            for r in records:
+                f_ev.write(json.dumps(r) + "\n")
+            ev_name = f_ev.name
+            f_sum.write(json.dumps(summary))
+            sum_name = f_sum.name
+        try:
+            snaps = generate_aligned_snapshots(
+                run_id="test-correlate",
+                sched_events_path=Path(ev_name),
+                sched_summary_path=Path(sum_name),
+                bucket_sec=1.0,
+            )
+            self.assertGreater(len(snaps), 0)
+            has_rw = any(s["sched"]["runwait_p99_us"] is not None for s in snaps if "sched" in s)
+            has_oncpu = any(s["sched"]["on_cpu_p99_us"] is not None for s in snaps if "sched" in s)
+            has_reclaim = any(s.get("system", {}).get("direct_reclaim_stall_ms") is not None for s in snaps)
+            self.assertTrue(has_rw)
+            self.assertTrue(has_oncpu)
+            self.assertTrue(has_reclaim)
+        finally:
+            os.unlink(ev_name)
+            os.unlink(sum_name)
+
+    def test_bottleneck_diagnosis_new_rules(self):
+        from collector.correlator import diagnose_system_bottlenecks
+        # Test direct reclaim rule
+        snapshots_reclaim = [
+            {
+                "schema_version": "0.1",
+                "run_id": "test-diag-rec",
+                "window": {"start_timestamp_ns": 1000, "end_timestamp_ns": 2000},
+                "sched": {"p99_us": 100.0, "runwait_p99_us": 100.0},
+                "system": {"direct_reclaim_stall_ms": 25.0},
+            }
+        ]
+        diag_rec = diagnose_system_bottlenecks(snapshots_reclaim)
+        self.assertEqual(diag_rec["primary_bottleneck"], "DIRECT_RECLAIM_MEMORY_STALL")
+        self.assertEqual(diag_rec["severity"], "CRITICAL")
+
+        # Test preemption contention rule
+        snapshots_preempt = [
+            {
+                "schema_version": "0.1",
+                "run_id": "test-diag-preempt",
+                "window": {"start_timestamp_ns": 1000, "end_timestamp_ns": 2000},
+                "sched": {"p99_us": 100.0, "runwait_p99_us": 12000.0},
+            }
+        ]
+        diag_preempt = diagnose_system_bottlenecks(snapshots_preempt)
+        self.assertEqual(diag_preempt["primary_bottleneck"], "CPU_PREEMPTION_CONTENTION")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

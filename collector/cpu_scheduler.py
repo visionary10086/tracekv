@@ -45,6 +45,7 @@ _ENV_CHECK_SCRIPT = Path(__file__).resolve().parent / "ebpf" / "env_check.bt"
 
 _EVENT_PREFIX = "SCHED|"
 _RUNWAIT_PREFIX = "RUNWAIT|"
+_ONCPU_PREFIX = "ONCPU|"
 _CLOCK_PREFIX = "CLOCK|"
 _STAT_PREFIX = "STAT|"
 _HEADER_PREFIX = "HEADER|"
@@ -121,6 +122,8 @@ class CollectorStats:
     map_overflow_count: int = 0          # E0: BPF map capacity overflow events
     runwait_event_count: int = 0         # E1: preempt-to-run events parsed
     kernel_runwait_matched: int | None = None  # E1: STAT|runwait_matched from kernel
+    oncpu_event_count: int = 0           # E2: on-cpu execution slices parsed
+    kernel_oncpu_matched: int | None = None    # E2: STAT|oncpu_matched from kernel
     min_ns: int | None = None
     max_ns: int | None = None
     sum_ns: int = 0
@@ -777,6 +780,8 @@ def process_stream(
                     result.stats.kernel_matched_count = value
                 elif name == "runwait_matched":          # E1
                     result.stats.kernel_runwait_matched = value
+                elif name == "oncpu_matched":            # E2
+                    result.stats.kernel_oncpu_matched = value
                 elif name == "map_overflow":             # E0
                     result.stats.map_overflow_count = value
             continue
@@ -817,6 +822,45 @@ def process_stream(
                     "is_target": rw_is_target,
                 }
                 output.write(json.dumps(rw_record) + "\n")
+            continue
+
+        # E2: Unified ONCPU execution slice event
+        if line.startswith(_ONCPU_PREFIX):
+            parts = line.split("|")
+            if len(parts) == 6:
+                try:
+                    oncpu_end_ns = int(parts[1])
+                    oncpu_tid = int(parts[2])
+                    oncpu_cpu = int(parts[3])
+                    oncpu_dur_ns = int(parts[4])
+                    oncpu_comm = parts[5].strip()
+                    if oncpu_dur_ns >= 0 and oncpu_tid >= 0:
+                        result.stats.oncpu_event_count += 1
+                        if output is not None:
+                            oncpu_wall = (
+                                to_wall_ns(oncpu_end_ns, result.kernel_clock_anchor)
+                                if hasattr(result, "kernel_clock_anchor") and result.kernel_clock_anchor
+                                else None
+                            )
+                            oncpu_is_tgt = tracker.matches(oncpu_tid, oncpu_comm)
+                            oncpu_tgid = tracker.resolve_tgid(oncpu_tid) if oncpu_is_tgt else None
+                            oncpu_record = {
+                                "metric": "on_cpu",
+                                "run_id": run_id,
+                                "timestamp_ns": oncpu_end_ns,
+                                "timestamp_wall_ns": oncpu_wall,
+                                "value": oncpu_dur_ns,
+                                "pid": oncpu_tgid,
+                                "tid": oncpu_tid,
+                                "cpu": oncpu_cpu,
+                                "comm": oncpu_comm,
+                                "is_target": oncpu_is_tgt,
+                            }
+                            output.write(json.dumps(oncpu_record) + "\n")
+                        continue
+                except (ValueError, IndexError):
+                    pass
+            result.stats.parser_error_count += 1
             continue
 
         if line.startswith(_EVENT_PREFIX):

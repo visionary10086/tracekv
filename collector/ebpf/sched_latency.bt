@@ -40,6 +40,7 @@ BEGIN
     @matched = 0;
     @map_overflow = 0;
     @runwait_matched = 0;
+    @oncpu_matched = 0;
 }
 
 /*
@@ -98,15 +99,29 @@ tracepoint:sched:sched_switch
     }
 
     /* Optional in-kernel early filtering by TGID */
-    if (TARGET_TGID != 0 && curtask->tgid != TARGET_TGID) {
-        /* If outgoing task is not target, don't record preempt for it */
-    } else {
+    $match_outgoing = (TARGET_TGID == 0) || (curtask->tgid == TARGET_TGID);
+    if ($match_outgoing) {
         /* --- Path B: record preempt timestamp for outgoing TASK_RUNNING task --- */
         if (args.prev_state == 0 && args.prev_pid != 0) {
             if (@preempt_ts[args.prev_pid] == 0) {
                 @preempt_ts[args.prev_pid] = nsecs(monotonic);
             }
         }
+        /* --- E2: Record ONCPU duration for outgoing task --- */
+        $in_ts = @on_cpu_start[args.prev_pid];
+        if ($in_ts != 0) {
+            $end_ts = nsecs(monotonic);
+            $dur = $end_ts - $in_ts;
+            printf("ONCPU|%llu|%d|%d|%llu|%s\n",
+                   $end_ts, args.prev_pid, cpu, $dur, args.prev_comm);
+            delete(@on_cpu_start[args.prev_pid]);
+            @oncpu_matched++;
+        }
+    }
+
+    /* Record switch-in for upcoming task */
+    if (args.next_pid != 0) {
+        @on_cpu_start[args.next_pid] = nsecs(monotonic);
     }
 
     /* --- Path A: Wakeup-to-Run --- */
@@ -154,22 +169,29 @@ tracepoint:sched:sched_process_exit
         delete(@preempt_ts[args.pid]);
         @exit_cleanup++;
     }
+    if (@on_cpu_start[args.pid] != 0) {
+        delete(@on_cpu_start[args.pid]);
+        @exit_cleanup++;
+    }
 }
 
 END
 {
     printf("STAT|matched|%llu\n", @matched);
     printf("STAT|runwait_matched|%llu\n", @runwait_matched);
+    printf("STAT|oncpu_matched|%llu\n", @oncpu_matched);
     printf("STAT|dup_wakeup|%llu\n", @dup_wakeup);
     printf("STAT|unmatched_switch|%llu\n", @unmatched_switch);
     printf("STAT|exit_cleanup|%llu\n", @exit_cleanup);
     printf("STAT|map_overflow|%llu\n", @map_overflow);
     clear(@enqueue_ts);
     clear(@preempt_ts);
+    clear(@on_cpu_start);
     clear(@dup_wakeup);
     clear(@unmatched_switch);
     clear(@exit_cleanup);
     clear(@matched);
     clear(@runwait_matched);
+    clear(@oncpu_matched);
     clear(@map_overflow);
 }
