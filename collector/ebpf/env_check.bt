@@ -1,0 +1,26 @@
+#!/usr/bin/env bpftrace
+/*
+ * env_check.bt — Minimal bpftrace liveness probe (E0)
+ *
+ * Verifies that bpftrace can successfully attach to the kernel and emit
+ * output.  Used by check_ebpf_environment() in cpu_scheduler.py to confirm
+ * that the eBPF subsystem is functional before launching longer-running
+ * collectors.
+ *
+ * Output:
+ *   OK|bpftrace_alive
+ *   OK|wall_ns=<realtime_ns>|mono_ns=<monotonic_ns>
+ *
+ * Returns immediately via exit().
+ *
+ * Author: 邓智文 (DAGER)
+ * Project: TraceKV — collector/ebpf/env_check.bt
+ */
+
+BEGIN
+{
+    printf("OK|bpftrace_alive\n");
+    printf("OK|wall_ns=%llu|mono_ns=%llu\n",
+           (uint64)nsecs(realtime), (uint64)nsecs(monotonic));
+    exit();
+}

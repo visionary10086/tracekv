@@ -1,12 +1,16 @@
 #!/usr/bin/env bpftrace
 /*
- * sched_latency.bt — CPU Scheduler Wakeup-to-Run Latency Tracer
+ * sched_latency.bt — CPU Scheduler Wakeup-to-Run & Preempt-to-Run Latency Tracer
  *
- * Measures the time between a task being woken up (placed on the run queue)
- * and actually being scheduled onto a CPU (context-switched in).
+ * Measures two complementary latency paths:
+ *   1. Wakeup-to-Run (SCHED): task woken from sleep → scheduled onto CPU
+ *   2. Preempt-to-Run (RUNWAIT): task preempted (prev_state==0) → re-scheduled
  *
- * Output format (one line per matched event, pipe-delimited):
+ * Output format (pipe-delimited):
+ *   CLOCK|wall_ns=<realtime_ns>|mono_ns=<monotonic_ns>
+ *   HEADER|switch_ns|wakeup_ns|tid|cpu|latency_ns|comm
  *   SCHED|<switch_ns>|<wakeup_ns>|<tid>|<cpu>|<latency_ns>|<comm>
+ *   RUNWAIT|<switch_ns>|<preempt_ns>|<tid>|<cpu>|<wait_ns>|<comm>
  *
  * Diagnostic counters are printed on exit with prefix STAT|.
  *
@@ -14,6 +18,7 @@
  * kernel's BTF (6.18.54.1-microsoft-standard-WSL2):
  *   sched_wakeup_template.pid  = target TID (offset 24)
  *   sched_switch.next_pid      = scheduled-in TID (offset 56)
+ *   sched_switch.prev_state    = outgoing task state  (offset 32)
  *
  * Author: 邓智文 (DAGER)
  * Project: TraceKV — collector/ebpf/sched_latency.bt
@@ -21,11 +26,16 @@
 
 BEGIN
 {
+    /* E0: emit clock anchor so userspace can convert mono→wall */
+    printf("CLOCK|wall_ns=%llu|mono_ns=%llu\n",
+           (uint64)nsecs(realtime), (uint64)nsecs(monotonic));
     printf("HEADER|switch_ns|wakeup_ns|tid|cpu|latency_ns|comm\n");
     @dup_wakeup = 0;
     @unmatched_switch = 0;
     @exit_cleanup = 0;
     @matched = 0;
+    @map_overflow = 0;
+    @runwait_matched = 0;
 }
 
 /*
@@ -58,13 +68,29 @@ tracepoint:sched:sched_wakeup_new
 /*
  * sched_switch
  *
- * args->next_pid is the TID of the task being switched IN.
- * We look it up in the map.  On match we emit the event and delete the key.
- * On miss (task was already running, or tracer started after wakeup) we
- * count an unmatched switch — this is normal, not an error.
+ * Handles two latency paths:
+ *
+ * Path A — Wakeup-to-Run (SCHED):
+ *   next_pid has an enqueue_ts → it was sleeping, just woke up → emit SCHED.
+ *
+ * Path B — Preempt-to-Run (RUNWAIT, E1):
+ *   prev_state == 0 means the outgoing task is still TASK_RUNNING (preempted,
+ *   not sleeping).  Record a preempt timestamp.  When that TID next runs,
+ *   emit RUNWAIT with the queuing wait duration.
+ *
+ * On miss for next_pid in both maps: normal unmatched switch (task was
+ * already running when tracer started).
  */
 tracepoint:sched:sched_switch
 {
+    /* --- Path B: record preempt timestamp for outgoing TASK_RUNNING task --- */
+    if (args.prev_state == 0 && args.prev_pid != 0) {
+        if (@preempt_ts[args.prev_pid] == 0) {
+            @preempt_ts[args.prev_pid] = nsecs(monotonic);
+        }
+    }
+
+    /* --- Path A: Wakeup-to-Run --- */
     $wakeup_ts = @enqueue_ts[args.next_pid];
     if ($wakeup_ts != 0) {
         $switch_ts = nsecs(monotonic);
@@ -73,11 +99,24 @@ tracepoint:sched:sched_switch
                $switch_ts, $wakeup_ts, args.next_pid, cpu, $latency,
                args.next_comm);
         delete(@enqueue_ts[args.next_pid]);
+        /* clear any stale preempt record for the same TID */
+        delete(@preempt_ts[args.next_pid]);
         @matched++;
     } else {
-        /* next_pid == 0 is the idle task — never tracked */
-        if (args.next_pid != 0) {
-            @unmatched_switch++;
+        /* --- Path B: Preempt-to-Run --- */
+        $preempt_ts = @preempt_ts[args.next_pid];
+        if ($preempt_ts != 0) {
+            $switch_ts = nsecs(monotonic);
+            $wait = $switch_ts - $preempt_ts;
+            printf("RUNWAIT|%llu|%llu|%d|%d|%llu|%s\n",
+                   $switch_ts, $preempt_ts, args.next_pid, cpu, $wait,
+                   args.next_comm);
+            delete(@preempt_ts[args.next_pid]);
+            @runwait_matched++;
+        } else {
+            if (args.next_pid != 0) {
+                @unmatched_switch++;
+            }
         }
     }
 }
@@ -92,17 +131,26 @@ tracepoint:sched:sched_process_exit
         delete(@enqueue_ts[args.pid]);
         @exit_cleanup++;
     }
+    if (@preempt_ts[args.pid] != 0) {
+        delete(@preempt_ts[args.pid]);
+        @exit_cleanup++;
+    }
 }
 
 END
 {
     printf("STAT|matched|%llu\n", @matched);
+    printf("STAT|runwait_matched|%llu\n", @runwait_matched);
     printf("STAT|dup_wakeup|%llu\n", @dup_wakeup);
     printf("STAT|unmatched_switch|%llu\n", @unmatched_switch);
     printf("STAT|exit_cleanup|%llu\n", @exit_cleanup);
+    printf("STAT|map_overflow|%llu\n", @map_overflow);
     clear(@enqueue_ts);
+    clear(@preempt_ts);
     clear(@dup_wakeup);
     clear(@unmatched_switch);
     clear(@exit_cleanup);
     clear(@matched);
+    clear(@runwait_matched);
+    clear(@map_overflow);
 }

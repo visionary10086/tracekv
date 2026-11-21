@@ -9,6 +9,14 @@ Requires ``bpftrace`` and sufficient privileges (typically root) to attach
 to kernel tracepoints.  When privileges are insufficient the collector
 exits cleanly with an informative message rather than crashing.
 
+E0 additions (2026-11-21):
+  - ClockAnchor: kernel realtime+monotonic clock pair from bpftrace CLOCK| line
+  - parse_clock(): parse CLOCK|wall_ns=...|mono_ns=... emitted by BEGIN block
+  - to_wall_ns(): convert kernel monotonic timestamp → UTC wall nanoseconds
+  - RunwaitEvent / parse_runwait(): Preempt-to-Run (RUNWAIT) latency path (E1)
+  - check_ebpf_environment(): bpftrace version, tracefs mount, privilege check
+  - map_overflow_count in CollectorStats
+
 Author: 邓智文 (DAGER)
 """
 
@@ -33,10 +41,15 @@ from typing import IO, TextIO
 # ---------------------------------------------------------------------------
 
 _SCRIPT_PATH = Path(__file__).resolve().parent / "ebpf" / "sched_latency.bt"
+_ENV_CHECK_SCRIPT = Path(__file__).resolve().parent / "ebpf" / "env_check.bt"
 
 _EVENT_PREFIX = "SCHED|"
+_RUNWAIT_PREFIX = "RUNWAIT|"
+_CLOCK_PREFIX = "CLOCK|"
 _STAT_PREFIX = "STAT|"
 _HEADER_PREFIX = "HEADER|"
+
+_MIN_BPFTRACE_VERSION = (0, 20, 0)
 
 DEFAULT_MAX_MAP_KEYS = 65536
 DEFAULT_PERF_RB_PAGES = 256
@@ -60,6 +73,35 @@ class SchedEvent:
 
 
 @dataclass
+class RunwaitEvent:
+    """One Preempt-to-Run latency observation (E1).
+
+    Captured when a task was preempted (prev_state==0 in sched_switch) and
+    subsequently rescheduled.  Covers the runnable-queue wait time that
+    wakeup_to_run_latency does NOT measure.
+    """
+    switch_ns: int     # monotonic ns when task re-enters CPU
+    preempt_ns: int    # monotonic ns when task was preempted off CPU
+    tid: int
+    cpu: int
+    wait_ns: int       # = switch_ns - preempt_ns
+    comm: str
+
+
+@dataclass
+class ClockAnchor:
+    """Kernel-emitted clock pair for monotonic→wall conversion (E0).
+
+    Extracted from the ``CLOCK|wall_ns=...|mono_ns=...`` line that
+    sched_latency.bt emits in its BEGIN block.  wall_ns is CLOCK_REALTIME
+    (nanoseconds since epoch); mono_ns is CLOCK_MONOTONIC at the same
+    instant, as seen by the kernel's bpftrace nsecs(realtime/monotonic).
+    """
+    wall_ns: int        # CLOCK_REALTIME  (kernel, nanoseconds)
+    monotonic_ns: int   # CLOCK_MONOTONIC (kernel, nanoseconds)
+
+
+@dataclass
 class TimeAnchor:
     """Pair of wall-clock and monotonic readings for time calibration."""
     wall_ns: int          # time.time_ns()
@@ -76,6 +118,9 @@ class CollectorStats:
     duplicate_wakeup_count: int = 0
     exit_cleanup_count: int = 0
     parser_error_count: int = 0
+    map_overflow_count: int = 0          # E0: BPF map capacity overflow events
+    runwait_event_count: int = 0         # E1: preempt-to-run events parsed
+    kernel_runwait_matched: int | None = None  # E1: STAT|runwait_matched from kernel
     min_ns: int | None = None
     max_ns: int | None = None
     sum_ns: int = 0
@@ -102,6 +147,7 @@ class CollectorResult:
     target_pids: list[int] | None = None
     target_comm: str | None = None
     target_stats: CollectorStats | None = None
+    kernel_clock_anchor: ClockAnchor | None = None  # E0: from CLOCK| line
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +204,218 @@ def parse_stat(line: str) -> tuple[str, int] | None:
         return parts[1], int(parts[2])
     except (ValueError, IndexError):
         return None
+
+
+def parse_clock(line: str) -> ClockAnchor | None:
+    """Parse a ``CLOCK|wall_ns=<n>|mono_ns=<n>`` line emitted by bpftrace BEGIN.
+
+    Returns a :class:`ClockAnchor` on success, ``None`` on malformed input.
+
+    Example input::
+
+        CLOCK|wall_ns=1700000000000000000|mono_ns=12345678901234
+
+    The two timestamps are captured by the kernel at the same instant,
+    providing an anchor for converting subsequent CLOCK_MONOTONIC event
+    timestamps to UTC wall-clock nanoseconds via :func:`to_wall_ns`.
+    """
+    if not line.startswith("CLOCK|"):
+        return None
+    parts = line.split("|")
+    if len(parts) != 3:
+        return None
+    try:
+        wall_part = parts[1]   # "wall_ns=<n>"
+        mono_part = parts[2]   # "mono_ns=<n>"
+        if not wall_part.startswith("wall_ns=") or not mono_part.startswith("mono_ns="):
+            return None
+        wall_ns = int(wall_part[len("wall_ns="):])
+        mono_ns = int(mono_part[len("mono_ns="):])
+    except (ValueError, IndexError):
+        return None
+    if wall_ns <= 0 or mono_ns <= 0:
+        return None
+    return ClockAnchor(wall_ns=wall_ns, monotonic_ns=mono_ns)
+
+
+def to_wall_ns(mono_ns: int, anchor: ClockAnchor) -> int:
+    """Convert a kernel CLOCK_MONOTONIC timestamp to UTC wall-clock nanoseconds.
+
+    Uses the kernel-emitted :class:`ClockAnchor` (wall + monotonic captured
+    simultaneously) to shift the monotonic reading into absolute time::
+
+        wall_ns = anchor.wall_ns + (mono_ns - anchor.monotonic_ns)
+
+    This provides sub-microsecond accuracy for event timestamps when the
+    anchor is captured close to the start of collection.
+
+    Args:
+        mono_ns:  Kernel monotonic nanoseconds from a bpftrace event.
+        anchor:   :class:`ClockAnchor` from :func:`parse_clock`.
+
+    Returns:
+        UTC nanoseconds since the Unix epoch.
+    """
+    return anchor.wall_ns + (mono_ns - anchor.monotonic_ns)
+
+
+def parse_runwait(line: str) -> RunwaitEvent | None:
+    """Parse a ``RUNWAIT|…`` line into a :class:`RunwaitEvent` (E1).
+
+    Format::
+
+        RUNWAIT|<switch_ns>|<preempt_ns>|<tid>|<cpu>|<wait_ns>|<comm>
+
+    Returns ``None`` if the line is malformed or values are invalid.
+    """
+    parts = line.split("|")
+    if len(parts) != 7 or parts[0] != "RUNWAIT":
+        return None
+    try:
+        switch_ns = int(parts[1])
+        preempt_ns = int(parts[2])
+        tid = int(parts[3])
+        cpu_id = int(parts[4])
+        wait_ns = int(parts[5])
+        comm = parts[6].strip()
+    except (ValueError, IndexError):
+        return None
+    if wait_ns < 0 or tid < 0 or switch_ns < 0 or preempt_ns < 0 or cpu_id < 0:
+        return None
+    if not comm:
+        return None
+    return RunwaitEvent(
+        switch_ns=switch_ns,
+        preempt_ns=preempt_ns,
+        tid=tid,
+        cpu=cpu_id,
+        wait_ns=wait_ns,
+        comm=comm,
+    )
+
+
+def check_ebpf_environment(bpftrace_path: str | None = None) -> dict:
+    """Check whether the eBPF collection environment is functional (E0).
+
+    Performs three independent checks and returns a summary dict:
+
+    * ``bpftrace_ok``: bpftrace binary found and responds to ``--version``.
+    * ``bpftrace_version``: detected version tuple, e.g. ``(0, 20, 4)``.
+    * ``version_ok``: ``True`` if version >= ``(0, 20, 0)``.
+    * ``tracefs_ok``: ``/sys/kernel/debug/tracing`` or
+      ``/sys/kernel/tracing`` is readable (tracefs mounted).
+    * ``privilege_ok``: running as root (``euid == 0``) or CAP_BPF present.
+    * ``liveness_ok``: env_check.bt executed successfully (bpftrace can
+      attach to kernel).  Only attempted when bpftrace_ok is True.
+    * ``details``: human-readable summary string.
+    * ``errors``: list of error strings for failed checks.
+
+    This function never raises; failures are captured in the return value.
+    """
+    result: dict = {
+        "bpftrace_ok": False,
+        "bpftrace_version": None,
+        "version_ok": False,
+        "tracefs_ok": False,
+        "privilege_ok": False,
+        "liveness_ok": False,
+        "details": "",
+        "errors": [],
+    }
+
+    # --- bpftrace binary check ---
+    bt = bpftrace_path or _find_bpftrace()
+    if bt is None:
+        result["errors"].append("bpftrace not found in PATH")
+    else:
+        try:
+            out = subprocess.run(
+                [bt, "--version"], capture_output=True, text=True, timeout=5
+            )
+            version_str = (out.stdout + out.stderr).strip()
+            # Parse "bpftrace v0.20.4" or "bpftrace 0.20.4"
+            import re as _re
+            m = _re.search(r"(\d+)\.(\d+)\.(\d+)", version_str)
+            if m:
+                ver = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                result["bpftrace_ok"] = True
+                result["bpftrace_version"] = ver
+                result["version_ok"] = ver >= _MIN_BPFTRACE_VERSION
+                if not result["version_ok"]:
+                    result["errors"].append(
+                        f"bpftrace {ver} < required {_MIN_BPFTRACE_VERSION}"
+                    )
+            else:
+                result["errors"].append(f"Cannot parse bpftrace version: {version_str!r}")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            result["errors"].append(f"bpftrace --version failed: {exc}")
+
+    # --- tracefs mount check ---
+    for tracefs_path in ("/sys/kernel/debug/tracing", "/sys/kernel/tracing"):
+        if Path(tracefs_path).is_dir() and os.access(tracefs_path, os.R_OK):
+            result["tracefs_ok"] = True
+            break
+    if not result["tracefs_ok"]:
+        result["errors"].append(
+            "tracefs not readable at /sys/kernel/debug/tracing or /sys/kernel/tracing"
+        )
+
+    # --- privilege check ---
+    if os.geteuid() == 0:
+        result["privilege_ok"] = True
+    else:
+        # Check for CAP_BPF via /proc/self/status CapEff
+        try:
+            status = Path("/proc/self/status").read_text(encoding="utf-8")
+            for line in status.splitlines():
+                if line.startswith("CapEff:"):
+                    cap_eff = int(line.split(":")[1].strip(), 16)
+                    # CAP_BPF = bit 39 (kernel 5.8+)
+                    if cap_eff & (1 << 39):
+                        result["privilege_ok"] = True
+                    break
+        except (OSError, ValueError):
+            pass
+    if not result["privilege_ok"]:
+        result["errors"].append("Not root and CAP_BPF not detected; bpftrace needs elevated privileges")
+
+    # --- liveness check (env_check.bt) ---
+    if result["bpftrace_ok"] and result["version_ok"]:
+        env_bt = _ENV_CHECK_SCRIPT
+        if env_bt.exists():
+            try:
+                out = subprocess.run(
+                    [bt, str(env_bt)],
+                    capture_output=True, text=True, timeout=10
+                )
+                if "OK|bpftrace_alive" in out.stdout:
+                    result["liveness_ok"] = True
+                else:
+                    result["errors"].append(
+                        f"env_check.bt did not emit OK|bpftrace_alive; "
+                        f"stdout={out.stdout!r} stderr={out.stderr!r}"
+                    )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                result["errors"].append(f"env_check.bt execution failed: {exc}")
+        else:
+            result["errors"].append(f"env_check.bt not found at {env_bt}")
+
+    all_ok = (
+        result["bpftrace_ok"]
+        and result["version_ok"]
+        and result["tracefs_ok"]
+        and result["privilege_ok"]
+        and result["liveness_ok"]
+    )
+    result["details"] = (
+        f"bpftrace={'ok' if result['bpftrace_ok'] else 'missing'} "
+        f"version={result['bpftrace_version']} "
+        f"tracefs={'ok' if result['tracefs_ok'] else 'missing'} "
+        f"privilege={'ok' if result['privilege_ok'] else 'missing'} "
+        f"liveness={'ok' if result['liveness_ok'] else 'skipped/fail'} "
+        f"→ {'READY' if all_ok else 'NOT READY'}"
+    )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -384,6 +642,44 @@ def process_stream(
                     result.stats.exit_cleanup_count = value
                 elif name == "matched":
                     result.stats.kernel_matched_count = value
+                elif name == "runwait_matched":          # E1
+                    result.stats.kernel_runwait_matched = value
+                elif name == "map_overflow":             # E0
+                    result.stats.map_overflow_count = value
+            continue
+
+        # E0: kernel clock anchor line
+        if line.startswith(_CLOCK_PREFIX):
+            anchor_parsed = parse_clock(line)
+            if anchor_parsed is not None:
+                result.kernel_clock_anchor = anchor_parsed
+            continue
+
+        # E1: Preempt-to-Run runwait event
+        if line.startswith(_RUNWAIT_PREFIX):
+            rw = parse_runwait(line)
+            if rw is None:
+                result.stats.parser_error_count += 1
+                continue
+            result.stats.runwait_event_count += 1
+            # Write RUNWAIT events to JSONL output with metric tag
+            if output is not None:
+                rw_wall_ns = (
+                    to_wall_ns(rw.switch_ns, result.kernel_clock_anchor)
+                    if hasattr(result, "kernel_clock_anchor") and result.kernel_clock_anchor
+                    else None
+                )
+                rw_record = {
+                    "metric": "runnable_wait",
+                    "run_id": run_id,
+                    "timestamp_ns": rw.switch_ns,
+                    "timestamp_wall_ns": rw_wall_ns,
+                    "value": rw.wait_ns,
+                    "tid": rw.tid,
+                    "cpu": rw.cpu,
+                    "comm": rw.comm,
+                }
+                output.write(json.dumps(rw_record) + "\n")
             continue
 
         if line.startswith(_EVENT_PREFIX):
