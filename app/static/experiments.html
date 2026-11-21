@@ -1,0 +1,34 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>实验工作台 · TraceKV</title><link rel="stylesheet" href="/static/style.css"></head><body data-page="experiments"><aside><a class="brand" href="/monitor"><span class="brand-icon">T</span>TraceKV<span class="version">0.3</span></a><div class="nav-label">工作空间</div><nav aria-label="主要导航"><a href="/monitor">◈ <span>实时监测</span></a><a href="/experiments" class="active" aria-current="page">⊞ <span>实验工作台</span></a><a href="/runs">≡ <span>运行记录</span></a></nav><a class="api-doc-link" href="/docs" target="_blank">接口文档</a><div class="aside-bottom">Linux 原生运行<br><small>真实采样 · 可复现实验</small></div></aside><main><header><div class="breadcrumb">工作空间 <span>/</span>实验工作台</div><div class="connection" id="connection">正在连接平台…</div></header><div id="error" class="error" role="alert" hidden></div><section id="experiment">
+<div class="section-title"><div class="eyebrow">EXPERIMENT WORKSPACE</div><h2>实验工作台</h2><p>选择本地模型，一次运行自动管理服务、请求、采集与报告。</p></div>
+<div class="workspace">
+<form class="panel" id="run-form">
+<div class="panel-head"><h3>新建实验</h3><span class="tag">vLLM 0.11.2</span></div>
+<div class="form-grid">
+<label class="wide">本地模型<select id="model" required></select></label>
+<label>工作负载<select id="workload" required></select></label>
+<label>缓存策略<select id="policy"><option value="gpu_only">GPU-only · 基础对照</option><option value="cpu_lru">CPU LRU · 缓存卸载</option></select></label>
+<label>正式请求数<input id="requests" type="number" min="1" max="10000" value="6" required></label>
+<label>并发数<input id="concurrency" type="number" min="1" max="4" value="1" required></label>
+<label>预热请求数<input id="warmup" type="number" min="0" max="100" value="1" required></label>
+<label>最大生成 token<input id="max-tokens" type="number" min="1" max="512" value="32" required></label>
+<label>GPU KV 块预算<input id="gpu-blocks" type="number" min="1" max="100000" value="64" required></label>
+<label>CPU KV 块预算<input id="cpu-blocks" type="number" min="0" max="100000" value="0" disabled required></label>
+</div>
+<div class="policy-advice">
+<div class="form-actions"><button class="secondary" type="button" id="recommend-button">根据当前观测获取建议</button><button class="secondary" type="button" id="apply-advice" disabled>填入下一轮配置</button></div>
+<p id="advice-text" role="status">建议只用于下一轮，需要对照实验验证。</p>
+</div><p class="form-note">每次启动独立模型服务，先预热后测量；不重置每条请求的缓存。端口占用时实验失败并保留日志。</p>
+<div class="form-actions"><button class="primary" type="submit" id="start-button">＋ 启动实验</button><span id="launch-message" role="status"></span></div>
+</form>
+<article class="panel current">
+<div class="panel-head"><h3>当前运行</h3><span class="pill" id="job-status">空闲</span></div>
+<div class="current-icon">⌁</div><h3 id="job-phase">准备好开始实验</h3><code id="job-id">启动后自动生成 run_id</code>
+<div class="progress"><i id="job-progress"></i></div><p id="job-detail">请求、快照、配置与报告将保存在同一结果目录。</p>
+<div class="current-actions"><button id="stop-button" class="secondary" disabled>停止实验</button><button id="inspect-button" class="secondary" disabled>查看产物</button></div>
+<div class="scope-note"><strong>本版接入范围</strong><p>缓存策略可直接配置。eBPF 事件可按 run_id 接收，内核采集器需独立启动。</p></div>
+</article>
+</div>
+</section><div class="bridge-grid">
+<article class="panel"><div class="panel-head"><h2>缓存策略接口</h2><span class="tag">v1.0 · next_run</span></div><p>输入当前观测与缓存配置，返回候选配置、触发理由和证据。不会修改正在运行的任务。</p><code>GET /api/v1/strategies<br>POST /api/v1/strategies/evaluate</code><a class="text-link" href="/docs#/Cache%20strategy" target="_blank">查看输入与返回字段</a> <a class="text-link" href="/api/v1/interfaces/examples/strategy-request" target="_blank">请求样例</a></article>
+<article class="panel"><div class="panel-head"><h2>eBPF 采集接口</h2><span class="tag">v1.0 · 外部采集器</span></div><p>以 run_id 关联目标线程、单调时间、UTC 锚点和丢失统计。数据接收与模型服务分别管理。</p><code>POST /api/v1/runs/{run_id}/telemetry/ebpf<br>GET /api/v1/runs/{run_id}/telemetry</code><a class="text-link" href="/docs#/eBPF%20integration" target="_blank">查看采集批次格式</a> <a class="text-link" href="/api/v1/interfaces" target="_blank">完整接口契约</a> <a class="text-link" href="/api/v1/interfaces/examples/ebpf" target="_blank">批次样例</a></article>
+</div><footer>TraceKV / Linux 监测平台 <span>观测关联需经对照实验验证。</span></footer></main><script src="/static/app.js" defer></script></body></html>

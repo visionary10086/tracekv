@@ -17,9 +17,20 @@
 
     /opt/tracekv/venv/bin/python -m tools.serve_platform
 
-打开 http://localhost:8010 ，查看 GPU / 系统 / KV 实时曲线，启动与停止真实推理实验，
+打开 http://localhost:8010/monitor ，查看 GPU / CPU / PSI / I/O / KV 实时指标与曲线，启动与停止真实推理实验，
 检查逐请求记录、原始采样及报告。页面离线可用，无需 Node 构建。
 本版尚未接入 eBPF 页面和自动对照批次；具体范围见 [平台使用说明](docs/Linux监测平台_使用与验收.md)。
+
+## 统一实验命令
+
+页面与命令行共用同一套配置校验、run_id 和目录创建逻辑。在 Linux 仓库根目录：
+
+    /opt/tracekv/venv/bin/python -m tools.run_experiment --config configs/smoke-gpu-only.json
+    /opt/tracekv/venv/bin/python -m tools.run_experiment --config configs/smoke-cpu-lru.json
+
+启动时打印 run_id 与结果目录；可用 --results-dir 指定结果根目录。示例使用本机默认模型路径，其他机器需在 JSON 中设置 model_path。失败与停止也保留清单和报告。
+
+结果包含 manifest.json、summary.json、逐请求与原始采样、aligned_snapshots.jsonl、bottleneck_diagnosis.json 和 report.md。调查提示为可解释的静态阈值，尚未校准分类准确率，不能当作因果证明或策略收益结论。
 
 ## MVP v0.1 联调接口
 
@@ -77,9 +88,19 @@ WSL 上的 RTX 4060 实测中，两组各完成 5 次请求，输出一致。CPU
 
 ## 下一步
 
-统一 `run_id` 与时间字段，接入 eBPF CPU/内存事件和框架 KV 指标；用长上下文、共享及非共享前缀负载，比较原生、开启追踪、启用缓存策略三组结果。参赛提交最终还需补充完整实现、过程记录与演示视频链接。
+统一实验入口、run_id、框架 KV 与系统指标已接入；继续接入 eBPF 页面和自动多轮对照，用长上下文、共享及非共享前缀负载比较原生、开启追踪和启用缓存策略三组结果。参赛提交还需补充完整过程记录与演示视频链接。
 
 ## 参考
 
 - [vLLM 0.11.2 GPU 安装文档](https://docs.vllm.ai/en/v0.11.2/getting_started/installation/gpu/)
 - [Qwen2.5-0.5B-Instruct 模型卡](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct) 
+
+## 页面与模块接口
+
+- 实时监测：http://localhost:8010/monitor
+- 实验工作台：http://localhost:8010/experiments
+- 运行记录：http://localhost:8010/runs
+- 缓存策略与 eBPF 明确接口：[接口文档](docs/interfaces.md)、[机器可读契约](contracts/platform-interface-v1.json)。
+- 在线交互文档：http://localhost:8010/docs；接口版本 1.0。
+
+三块内容是独立页面。eBPF 接收与报告接口已提供，本机内核采集器仍需独立准备；收到数据不代表当前正在实时采集。

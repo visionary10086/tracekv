@@ -1,0 +1,31 @@
+{
+  "interface_version": "1.0",
+  "run_id": "demo-001",
+  "created_at_utc": "2026-11-21T06:25:26.880095Z",
+  "apply_mode": "next_run",
+  "strategy_id": "gpu_only",
+  "config_patch": {
+    "policy": "gpu_only",
+    "gpu_kv_blocks": 64,
+    "cpu_kv_blocks": 0
+  },
+  "reason": "当前观测不足以证明更换缓存策略有益，保留当前配置。",
+  "reason_codes": [
+    "KEEP_BASELINE"
+  ],
+  "evidence": {
+    "mem_available_mb": 2048.0,
+    "kv_usage_ratio": 0.85,
+    "prefix_hit_ratio": 0.42,
+    "scope": {
+      "system": "whole_host"
+    }
+  },
+  "requires_comparison": true,
+  "causality_established": false,
+  "limitations": [
+    "规则阈值未经分类准确率校准，建议不保证收益。",
+    "保留 GPU 块预算；CPU 块数是实验参数，不是按内存容量推导的安全上限。",
+    "只返回下一轮候选配置，不修改运行中的服务。"
+  ]
+}

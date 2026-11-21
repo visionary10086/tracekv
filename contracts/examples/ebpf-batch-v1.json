@@ -1,0 +1,33 @@
+{
+  "interface_version": "1.0",
+  "run_id": "EXAMPLE_RUN_ID",
+  "batch_id": "example-batch-001",
+  "collector_id": "example-collector",
+  "clock": {
+    "wall_ns": 1795219200000000000,
+    "monotonic_ns": 10000000000
+  },
+  "window_start_ns": 10000000000,
+  "window_end_ns": 10100000000,
+  "status": "ok",
+  "dropped_events": null,
+  "synthetic": true,
+  "source": "ebpf_sched",
+  "scope": "target_threads",
+  "target_tids": [
+    1234
+  ],
+  "events": [
+    {
+      "metric": "wakeup_to_run_latency",
+      "timestamp_ns": 10010000000,
+      "tid": 1234,
+      "pid": null,
+      "comm": "worker",
+      "cpu": 0,
+      "request_id": null,
+      "value": 200000,
+      "unit": "ns"
+    }
+  ]
+}

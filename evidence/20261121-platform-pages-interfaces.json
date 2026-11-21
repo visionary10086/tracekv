@@ -1,0 +1,34 @@
+{
+  "recorded_at_utc": "2026-11-21T06:35:04.530624Z",
+  "base_commit": "840b9adad471bcb713defb90d36a888b6e00199c",
+  "branch": "feat/platform-pages-interfaces-20261121",
+  "unit_tests": {
+    "command": "/opt/tracekv/venv/bin/python -m unittest discover -s tests -q",
+    "passed": 135
+  },
+  "http_verified": {
+    "/monitor": 200,
+    "/experiments": 200,
+    "/runs": 200,
+    "/api/v1/interfaces": 200,
+    "/api/v1/interfaces/guide": 200,
+    "/api/v1/interfaces/examples/ebpf": 200
+  },
+  "browser_verified": [
+    "Independent monitor/workspace/archive navigation",
+    "Real GPU/system gauges on monitor",
+    "Policy recommendation requested and explicitly applied to next-run form without launching a job",
+    "Archive search and historical real CPU LRU run detail",
+    "CPU LRU and concurrency=4 draft survived navigation"
+  ],
+  "contract_sha256": "10a040701a4054e9906fa2ca35535eecbddeffa9756318224b73afd7adf983e5",
+  "contract_matches_running_api": true,
+  "screenshot": "evidence/20261121-experiments.jpg",
+  "limitations": [
+    "eBPF kernel attachment was not run; bpftrace not installed on this host.",
+    "Integration tests use temporary fixtures; synthetic batches are excluded from real-observation summaries.",
+    "External batch origin is declared by producers; the receiver cannot prove kernel provenance.",
+    "No new inference performance comparison was run for this page/interface change.",
+    "External telemetry is reported separately and not copied as global scheduling values into every sample window."
+  ]
+}

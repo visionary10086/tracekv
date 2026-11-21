@@ -1,0 +1,34 @@
+{
+  "interface_version": "1.0",
+  "run_id": "EXAMPLE_RUN_ID",
+  "batch_id": "example-batch-001",
+  "collector_id": "example-collector",
+  "clock": {
+    "wall_ns": 1795219200000000000,
+    "monotonic_ns": 10000000000
+  },
+  "window_start_ns": 10000000000,
+  "window_end_ns": 10100000000,
+  "status": "ok",
+  "dropped_events": null,
+  "synthetic": true,
+  "source": "cache",
+  "events": [
+    {
+      "metric": "transfer",
+      "timestamp_ns": 10010000000,
+      "worker_id": "worker-0",
+      "pid": null,
+      "request_id": null,
+      "tier": "cpu",
+      "cache_key": "model-revision-format-prefix-hash",
+      "job_id": "job-001",
+      "direction": "gpu_to_cpu",
+      "status": "completed",
+      "bytes": 1048576,
+      "blocks": 1,
+      "tokens": 16,
+      "elapsed_ns": 1000000
+    }
+  ]
+}

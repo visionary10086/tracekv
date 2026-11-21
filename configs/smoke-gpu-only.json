@@ -1,0 +1,7 @@
+{
+  "policy": "gpu_only",
+  "cpu_kv_blocks": 0,
+  "requests": 3,
+  "max_tokens": 16,
+  "sample_interval_ms": 500
+}
