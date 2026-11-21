@@ -5,7 +5,7 @@ let contextId=null, contextVersion=0, timelineCursor=null, timelineData=null, ti
 try{const q=new URLSearchParams(location.search);contextId=q.has("run_id")?q.get("run_id"):sessionStorage.getItem("tracekv-run-context");if(contextId==="host")contextId=null;}catch(_){}
 let samples=[], selected=null, current=null, allRuns=[], launchPending=false, advice=null;
 const stateNames={running:"运行中",completed:"已完成",failed:"失败",interrupted:"已停止",orphaned:"需检查"};
-const phaseNames={queued:"准备实验",starting_server:"正在加载模型…",warmup:"预热中…",measuring:"正在采集与测量",finished:"实验已结束"};
+const phaseNames={queued:"准备实验",starting_server:"正在加载模型…",warmup:"预热中…",measuring:"正在采集与测量",finished:"实验已结束",stopping:"正在停止并保存数据…"};
 async function api(path,options){
  const response=await fetch(path,options),data=await response.json();
  if(!response.ok)throw new Error(typeof data.detail==="string"?data.detail:JSON.stringify(data.detail));
@@ -96,6 +96,7 @@ function drawCharts(){
 }
 function pill(status){const span=document.createElement("span");span.className="pill "+status;span.textContent=stateNames[status]||status;return span;}
 
+const assessmentNames={insufficient_data:"证据不足",incomparable_configuration:"配置或版本不一致，暂不可比",paired_observation_requires_repeats:"已记录，需多轮验证"};
 function numeric(value,digits=2){return Number.isFinite(value)?Number(value.toFixed(digits)):"—";}
 function renderCurrent(){
  current=(contextId?allRuns.find(r=>r.run_id===contextId):null)||allRuns.find(r=>r.status==="running")||null;
@@ -164,7 +165,7 @@ async function inspect(id,scroll=false){
    $("diagnosis-coverage").textContent="有效采样：GPU "+(counts.gpu??0)+" · CPU PSI "+(counts.psi_cpu??0)+" · 调度 "+(counts.sched??0);
   }
   const slo=data.summary?.slo;
-  for(const text of ["客户端 TPOT 估计 P95 / ms："+numeric(data.summary?.client_tpot_estimate_ms_p95),slo?.configured?("SLO 达标："+slo.passed+" / "+slo.planned_requests+" 计划 · 未知 "+slo.unknown+" · 达标吞吐 "+numeric(slo.goodput_requests_per_second)+" 请求/s"):"SLO：本次未配置","建议复核："+(data.analysis?.recommendation_assessment?.status||"未关联建议")]){
+  for(const text of ["客户端 TPOT 估计 P95 / ms："+numeric(data.summary?.client_tpot_estimate_ms_p95),slo?.configured?("SLO 达标："+slo.passed+" / "+slo.planned_requests+" 计划 · 未知 "+slo.unknown+" · 达标吞吐 "+numeric(slo.goodput_requests_per_second)+" 请求/s"):"SLO：本次未配置","建议复核："+(assessmentNames[data.analysis?.recommendation_assessment?.status]||data.analysis?.recommendation_assessment?.status||"未关联建议")]){
    const el=document.createElement("span");el.textContent=text;$("detail-metrics").append(el);
   }
   renderTelemetry(data.telemetry);
@@ -248,6 +249,7 @@ async function initExperiments(){
   try{await api("/api/v1/runs/"+current.run_id+"/stop",{method:"POST"});$("job-phase").textContent="正在停止并保存数据…";}catch(e){showError(e.message);}
  };
  $("inspect-button").onclick=()=>current&&location.assign("/runs?run_id="+encodeURIComponent(current.run_id));
+ $("recommend-button").disabled=false;
 }
 async function init(){
  try{

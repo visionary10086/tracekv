@@ -110,6 +110,9 @@ class Jobs:
                     if manifest.get("status") == "running" and not owned and not external:
                         manifest["status"] = "orphaned"
                         manifest["error"] = "No matching process identity; inspect saved logs. No PID was adopted."
+                    if manifest.get("status")=="running" and (folder/"cancel.flag").exists():
+                        manifest["phase"]="stopping"
+                        manifest["can_stop"]=False
                     runs.append(manifest)
             except (OSError, ValueError):
                 continue

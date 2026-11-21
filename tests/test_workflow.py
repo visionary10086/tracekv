@@ -326,3 +326,17 @@ class WorkflowTests(unittest.TestCase):
             response=TestClient(app).get("/api/v1/comparisons/cmp-test/files/report.md")
         self.assertEqual(response.status_code,200)
         self.assertIn("attachment",response.headers["content-disposition"])
+
+    def test_cancel_pending_is_visible_until_runner_finishes(self):
+        from unittest.mock import MagicMock
+        jobs=Jobs(self.root)
+        self.manifest.update(status="running",phase="starting_server")
+        write_json(self.out/"manifest.json",self.manifest)
+        jobs.active_id=self.out.name
+        jobs.process=MagicMock()
+        jobs.process.poll.return_value=None
+        jobs.stop(self.out.name)
+        row=jobs.list()[0]
+        self.assertEqual(row["phase"],"stopping")
+        self.assertFalse(row["can_stop"])
+        self.assertEqual(row["status"],"running")
