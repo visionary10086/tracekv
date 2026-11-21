@@ -128,3 +128,7 @@ dropped_events=null 表示未知；0 必须有核对证据。这个数描述采�
 - 样例包含 synthetic=true；不要把样例改名后当成实测证据。
 
 在线交接入口：/api/v1/interfaces/guide 提供本文；/api/v1/interfaces/examples/ebpf、cache、strategy-request、strategy-response 提供对应 JSON 样例，均无需外部 CDN。
+
+## 实验闭环更新
+
+共享实验上下文、采集档位、SLO、时间线、多轮对照与建议追溯见 [实验平台闭环](platform-workflow.md)。

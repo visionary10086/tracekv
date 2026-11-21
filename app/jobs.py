@@ -8,13 +8,14 @@ import sys
 import threading
 
 from contracts.schema import utc_now
+from app.runtime import alive, signal_verified, port_busy
 from tools.run_experiment import ROOT, create_run, validate_config, write_json
 
 ARTIFACTS = {
     "manifest.json", "requests.jsonl", "request_summary.json", "analysis.json", "warmup.jsonl",
     "report.md", "snapshots.jsonl", "aligned_snapshots.jsonl", "kv_samples.jsonl",
     "gpu_samples.jsonl", "system_samples.jsonl", "kv_transfers.jsonl", "kv_cpu_occupancy.jsonl",
-    "summary.json", "bottleneck_diagnosis.json", "telemetry_summary.json",
+    "summary.json", "bottleneck_diagnosis.json", "telemetry_summary.json", "sched_events.jsonl", "sched_summary.json", "stage_summary.json",
     "logs/runner.log", "logs/server-launcher.log", "server/server.log",
 }
 
@@ -25,6 +26,7 @@ class Jobs:
         self.lock = threading.Lock()
         self.process = None
         self.active_id = None
+        self.reservation = None
 
     def resolve(self, name):
         if not name or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for c in name):
@@ -38,7 +40,7 @@ class Jobs:
         root = Path(os.environ.get("TRACEKV_MODEL_ROOT", "/opt/tracekv/models")).resolve()
         return [str(p) for p in sorted(root.iterdir()) if p.is_dir() and (p / "config.json").is_file()] if root.is_dir() else []
 
-    def start(self, config):
+    def start(self, config, comparison_id=None, reservation=None, recommendation=None):
         cfg = validate_config(config)
         if str(Path(cfg["model_path"]).resolve()) not in self.models():
             raise ValueError("Select a model from the configured model root")
@@ -46,11 +48,15 @@ class Jobs:
         if not Path(cfg["workload_path"]).is_relative_to(workload_root):
             raise ValueError("Workload must be inside the repository workloads directory")
         with self.lock:
+            if self.reservation is not None and self.reservation != reservation:
+                raise RuntimeError("An automatic comparison owns the experiment queue")
             if self.process is not None and self.process.poll() is None:
                 raise RuntimeError("An experiment is already running")
+            if any(run.get("status") == "running" for run in self.list()) or port_busy(cfg["port"]):
+                raise RuntimeError("A verified experiment already owns the inference resource")
             if sys.platform != "linux":
                 raise ValueError("Start experiments from Linux")
-            out, manifest = create_run(cfg, self.root)
+            out, manifest = create_run(cfg, self.root, origin="platform", comparison_id=comparison_id, recommendation=recommendation)
             name = manifest["run_id"]
             try:
                 with (out / "logs/runner.log").open("w") as log:
@@ -66,13 +72,25 @@ class Jobs:
 
     def stop(self, name):
         with self.lock:
-            if self.active_id != name or self.process is None or self.process.poll() is not None:
-                raise ValueError("This server does not own a running experiment with that run_id")
-            out = self.resolve(name)
+            try:
+                out = self.resolve(name)
+                manifest = json.loads((out / "manifest.json").read_text())
+            except (OSError, ValueError) as exc:
+                raise ValueError("Experiment not found") from exc
+            if manifest.get("status") != "running":
+                raise ValueError("Experiment has already ended")
+            owned = self.active_id == name and self.process is not None and self.process.poll() is None
+            external = alive(manifest.get("runner_identity"))
+            if not owned and not external:
+                raise ValueError("No verified running process belongs to this run_id")
             (out / "cancel.flag").touch()
-            manifest = json.loads((out / "manifest.json").read_text())
-            if manifest.get("runner_ready"):
+            if owned and manifest.get("runner_ready"):
                 self.process.send_signal(signal.SIGTERM)
+            elif external:
+                try:
+                    signal_verified(manifest["runner_identity"])
+                except (OSError, RuntimeError) as exc:
+                    raise ValueError(str(exc)) from exc
             return {"run_id": name, "status": "stopping"}
 
     def list(self):
@@ -86,12 +104,12 @@ class Jobs:
                 manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
                 if "config" in manifest and "policy" in manifest["config"]:
                     owned = self.active_id == folder.name and self.process is not None and self.process.poll() is None
-                    manifest["can_stop"] = bool(owned)
-                    if manifest.get("status") == "running":
-                        owned = self.active_id == folder.name and self.process and self.process.poll() is None
-                        if not owned:
-                            manifest["status"] = "orphaned"
-                            manifest["error"] = "Supervisor no longer owns this job; inspect saved process and logs."
+                    external = alive(manifest.get("runner_identity"))
+                    manifest["can_stop"] = bool(manifest.get("status") == "running" and (owned or external))
+                    manifest["process_status"] = "verified" if owned or external else "not_running_or_unknown"
+                    if manifest.get("status") == "running" and not owned and not external:
+                        manifest["status"] = "orphaned"
+                        manifest["error"] = "No matching process identity; inspect saved logs. No PID was adopted."
                     runs.append(manifest)
             except (OSError, ValueError):
                 continue
@@ -109,7 +127,7 @@ class Jobs:
                 try:
                     manifest = json.loads((self.root / self.active_id / "manifest.json").read_text())
                     server_pid = manifest.get("server_pid")
-                    if server_pid:
+                    if server_pid and alive(manifest.get("server_identity")):
                         os.killpg(server_pid, signal.SIGKILL)
                 except (OSError, ValueError):
                     pass

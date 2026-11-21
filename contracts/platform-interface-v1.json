@@ -746,6 +746,23 @@
           },
           "title": "Limitations",
           "type": "array"
+        },
+        "recommendation_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Recommendation Id"
+        },
+        "source_run_verified": {
+          "default": false,
+          "title": "Source Run Verified",
+          "type": "boolean"
         }
       },
       "required": [

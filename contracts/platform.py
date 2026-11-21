@@ -145,3 +145,5 @@ class StrategyAdvice(Contract):
     requires_comparison: Literal[True]
     causality_established: Literal[False]
     limitations: list[StrictStr]
+    recommendation_id: StrictStr | None = None
+    source_run_verified: StrictBool = False

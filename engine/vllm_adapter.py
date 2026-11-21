@@ -3,6 +3,7 @@ import re
 import math
 import time
 import urllib.request
+from engine.histograms import histograms, deltas, series
 
 
 METRIC = re.compile(r'^vllm:([a-z_]+)(?:\{[^}]*\})?\s+([0-9.eE+-]+)$')
@@ -29,22 +30,37 @@ class VllmAdapter:
         self.last_deltas = {}
         self.last_sample_monotonic = None
         self.last_window_ms = None
+        self.previous_histograms = None
+        self.last_histograms = []
+        self.last_series = []
 
     def sample(self):
         with urllib.request.urlopen(self.url, timeout=2) as response:
-            current = parse_metrics(response.read().decode("utf-8"))
+            body = response.read().decode("utf-8")
+            current = parse_metrics(body)
+            self.last_series = series(body)
+            raw_histograms = histograms(body)
+            self.last_histograms = deltas(raw_histograms, self.previous_histograms)
+            self.previous_histograms = raw_histograms
         sampled_at = time.monotonic()
         if self.last_sample_monotonic is not None:
             self.last_window_ms = max(1, round((sampled_at - self.last_sample_monotonic) * 1000))
         self.last_sample_monotonic = sampled_at
         self.last_counters = {key: value for key, value in current.items() if key.endswith("_total")}
         self.last_deltas = {}
-        usage = current.get("kv_cache_usage_perc")
-        running = current.get("num_requests_running")
+        # Scalar dashboard values require one label set. Never sum engine ratios
+        # or hide a per-engine counter reset behind another engine's increase.
+        scalar = {}
+        for name in ("kv_cache_usage_perc","num_requests_running","num_requests_waiting",
+                     "prefix_cache_queries_total","prefix_cache_hits_total"):
+            values=[r for r in self.last_series if r["name"]==name]
+            scalar[name]=values[0]["value"] if len(values)==1 else None
+        usage = scalar.get("kv_cache_usage_perc")
+        running = scalar.get("num_requests_running")
         ratio = None
         if self.previous is not None:
-            query = current.get("prefix_cache_queries_total")
-            hits = current.get("prefix_cache_hits_total")
+            query = scalar.get("prefix_cache_queries_total")
+            hits = scalar.get("prefix_cache_hits_total")
             old_query = self.previous.get("prefix_cache_queries_total")
             old_hits = self.previous.get("prefix_cache_hits_total")
             if None not in (query, hits, old_query, old_hits):
@@ -52,7 +68,9 @@ class VllmAdapter:
                 self.last_deltas = {"queries": dq, "hits": dh}
                 if query >= old_query and hits >= old_hits and dq > 0 and 0 <= dh <= dq:
                     ratio = dh / dq
-        self.previous = current
-        return {"usage_ratio": usage if usage is not None and 0 <= usage <= 1 else None,
+        self.previous = scalar
+        waiting = scalar.get("num_requests_waiting")
+        return {"waiting_requests": int(waiting) if waiting is not None and waiting >= 0 and waiting.is_integer() else None,
+                "usage_ratio": usage if usage is not None and 0 <= usage <= 1 else None,
                 "prefix_hit_ratio": ratio,
                 "running_requests": int(running) if running is not None and running >= 0 and running.is_integer() else None}
