@@ -612,12 +612,10 @@ def event_to_jsonl(
     tracker: ThreadTracker | None = None,
 ) -> str:
     """Serialize one event to a JSON line (no trailing newline)."""
-    # Resolve real TGID if known via tracker
+    # sched_switch supplies a TID and comm, not the process TGID.
     pid_val = None
     if tracker is not None:
         is_target = tracker.matches(event.tid, event.comm)
-        if is_target:
-            pid_val = tracker.resolve_tgid(event.tid)
     else:
         is_target = _matches_target(event, target_pids, target_comm) if (
             target_pids is not None or target_comm is not None

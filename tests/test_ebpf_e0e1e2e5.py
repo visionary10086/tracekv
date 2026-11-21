@@ -630,8 +630,9 @@ class TestP0Fixes(unittest.TestCase):
         ev = SchedEvent(switch_ns=1000, wakeup_ns=900, tid=1235, cpu=0, latency_ns=100, comm="vllm_worker")
         line = event_to_jsonl(ev, run_id="tgid-test", tracker=tracker)
         rec = json.loads(line)
-        # Real TGID is 1234, while tid is 1235
-        self.assertEqual(rec["pid"], 1234)
+        # Real TGID is 1234 via tracker, while sched_switch event leaves pid=None per telemetry contract
+        self.assertIsNone(rec["pid"])
+        self.assertEqual(tracker.resolve_tgid(1235), 1234)
         self.assertEqual(rec["tid"], 1235)
         self.assertTrue(rec["is_target"])
 
