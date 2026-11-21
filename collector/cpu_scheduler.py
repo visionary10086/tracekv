@@ -1029,8 +1029,9 @@ def run_collector(
     target_pid: int | None = None,
     target_pids: list[int] | None = None,
     target_comm: str | None = None,
+    engine: str = "auto",
 ) -> CollectorResult:
-    """Launch bpftrace and collect scheduler latency events in real-time.
+    """Launch bpftrace or native libbpf engine to collect scheduler latency events.
 
     Parameters
     ----------
@@ -1065,6 +1066,9 @@ def run_collector(
         List of target thread IDs (legacy parameter name).
     target_comm:
         Thread command name to match; this does not prove process identity.
+    engine:
+        Engine mode: 'auto' (default: attempts native libbpf, falls back to bpftrace),
+        'libbpf' (native high-perf CO-RE engine), or 'bpftrace' (script engine).
 
     Returns
     -------
@@ -1073,6 +1077,30 @@ def run_collector(
     """
     if target_pid is not None and target_pids is None:
         target_pids = [target_pid]
+
+    if engine == "libbpf":
+        from collector.native_engine import run_native_collector
+        return run_native_collector(
+            output_path=output_path,
+            duration_seconds=duration_seconds or DEFAULT_COLLECTION_DURATION,
+            run_id=run_id,
+            target_pids=target_pids,
+            target_comm=target_comm,
+        )
+    elif engine == "auto":
+        try:
+            from collector.native_engine import check_native_engine_environment, run_native_collector
+            diag = check_native_engine_environment()
+            if diag.get("status") == "READY":
+                return run_native_collector(
+                    output_path=output_path,
+                    duration_seconds=duration_seconds or DEFAULT_COLLECTION_DURATION,
+                    run_id=run_id,
+                    target_pids=target_pids,
+                    target_comm=target_comm,
+                )
+        except Exception:
+            pass  # Transparent fallback to bpftrace
 
     bt = bpftrace_bin or _find_bpftrace()
     if bt is None:
@@ -1303,9 +1331,11 @@ def main(argv: list[str] | None = None) -> int:
                         help="Target TID (legacy --pid option; does not include all process threads)")
     parser.add_argument("--comm", type=str, default=None,
                         help="Thread name match (comm); does not establish process identity")
+    parser.add_argument("--engine", choices=["auto", "libbpf", "bpftrace"], default="auto",
+                        help="Telemetry engine: 'auto' (libbpf if ready, else bpftrace), 'libbpf' (native high-perf), 'bpftrace' (script mode)")
     args = parser.parse_args(argv)
 
-    print(f"Starting scheduler latency collector (run_id={args.run_id}, duration={args.duration}s)",
+    print(f"Starting scheduler latency collector (run_id={args.run_id}, duration={args.duration}s, engine={args.engine})",
           file=sys.stderr, flush=True)
 
     result = run_collector(
@@ -1317,6 +1347,7 @@ def main(argv: list[str] | None = None) -> int:
         kernel_build=args.kernel_build,
         target_pid=args.pid,
         target_comm=args.comm,
+        engine=args.engine,
     )
 
     summary = stats_to_dict(result)

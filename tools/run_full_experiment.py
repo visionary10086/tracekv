@@ -62,10 +62,12 @@ def run_orchestrated_experiment(
     target_comm: str | None = None,
     kv_transfers_path: Path | None = None,
     bucket_sec: float = 1.0,
+    engine: str = "auto",
 ) -> dict[str, Any]:
     out_dir.mkdir(parents=True, exist_ok=True)
     print_banner(f"TraceKV Telemetry & Diagnostic Orchestrator (run_id: {run_id})")
     print(f"[*] Duration:      {duration_s} seconds")
+    print(f"[*] Engine:        {engine}")
     print(f"[*] Target PID:    {target_pid or 'system-wide'}")
     print(f"[*] Target COMM:   {target_comm or 'system-wide'}")
     print(f"[*] Output Dir:    {out_dir}")
@@ -87,7 +89,7 @@ def run_orchestrated_experiment(
     sys_mon.start()
 
     # 2. Run eBPF CPU Scheduler Collector
-    print(f"[+] Starting eBPF Unified Scheduler Tracer for {duration_s}s...")
+    print(f"[+] Starting eBPF Unified Scheduler Tracer for {duration_s}s (engine={engine})...")
     target_pids = [target_pid] if target_pid is not None else None
     t0 = time.time()
 
@@ -97,6 +99,7 @@ def run_orchestrated_experiment(
         output_path=sched_events_path,
         target_pids=target_pids,
         target_comm=target_comm,
+        engine=engine,
     )
     elapsed = time.time() - t0
     print(f"[+] eBPF collection completed in {elapsed:.2f}s.")
@@ -171,6 +174,8 @@ def main() -> int:
     parser.add_argument("--target-comm", default=None, help="Target command name to isolate")
     parser.add_argument("--kv-transfers", type=Path, default=None, help="Path to kv_transfers.jsonl")
     parser.add_argument("--bucket-sec", type=float, default=1.0, help="Snapshot window width in seconds")
+    parser.add_argument("--engine", choices=["auto", "libbpf", "bpftrace"], default="auto",
+                        help="Telemetry engine: 'auto' (native if available, else bpftrace), 'libbpf' (native high-perf), 'bpftrace' (script mode)")
     args = parser.parse_args()
 
     run_orchestrated_experiment(
@@ -181,6 +186,7 @@ def main() -> int:
         target_comm=args.target_comm,
         kv_transfers_path=args.kv_transfers,
         bucket_sec=args.bucket_sec,
+        engine=args.engine,
     )
     return 0
 
