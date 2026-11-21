@@ -1,7 +1,7 @@
 "use strict";
 const $ = id => document.getElementById(id);
 const page = document.body.dataset.page;
-let contextId=null, contextVersion=0, timelineCursor=null, timelineData=null, comparisonId=null, comparisonsList=[], appliedAdvice=null;
+let contextId=null, contextVersion=0, timelineCursor=null, timelineData=null, timelineFilters={}, comparisonId=null, comparisonsList=[], appliedAdvice=null;
 try{const q=new URLSearchParams(location.search);contextId=q.has("run_id")?q.get("run_id"):sessionStorage.getItem("tracekv-run-context");if(contextId==="host")contextId=null;}catch(_){}
 let samples=[], selected=null, current=null, allRuns=[], launchPending=false, advice=null;
 const stateNames={running:"运行中",completed:"已完成",failed:"失败",interrupted:"已停止",orphaned:"需检查"};
@@ -16,7 +16,19 @@ function value(id, number, unit, digits=1) {
   $(id).replaceChildren(document.createTextNode(Number.isFinite(number) ? number.toFixed(digits) : "—"));
   const small = document.createElement("small"); small.textContent = unit; $(id).append(small);
 }
+function renderSources(statuses){
+ $("sources").replaceChildren();
+ const labels={system:"系统遥测",gpu:"GPU 遥测",kv:"vLLM 指标",sched:"eBPF 调度"};
+ for(const [key,status] of Object.entries(statuses||{})){
+  const item=document.createElement("span");item.className="source-item "+status.status;
+  item.title=status.error||status.target_tracking||"正常采集";
+  item.append(document.createElement("b"),document.createTextNode((labels[key]||key)+" · "+({ok:"正常",failed:"失败",unavailable:"未接入",disabled:"已关闭",starting:"正在尝试挂载"}[status.status]||status.status)));
+  $("sources").append(item);
+ }
+}
 function renderLive() {
+  const run=allRuns.find(r=>r.run_id===contextId);
+  $("view-mode").textContent=!contextId?"整机":run?.config.trace_profile==="off"?"采样关闭":run?.status==="running"?"运行":"历史";
   const s = samples.at(-1); if (!s) {
     for(const [id,unit] of [["gpu-value","MB"],["memory-value","GB"],["kv-value","%"],["hit-value","%"],["cpu-value","%"],["pressure-value","%"],["io-value","MB/s"],["pcie-value","MB/s"]])value(id,null,unit);
     $("gpu-meter").style.width="0";$("kv-meter").style.width="0";
@@ -45,13 +57,7 @@ function renderLive() {
   $("pressure-note").textContent = "内存 PSI "+format(psi.psi_mem_some_avg10)+"% · I/O PSI "+format(psi.psi_io_some_avg10)+"%";
   $("io-note").textContent = "写入 "+format(io.write_bytes_per_s == null ? null : io.write_bytes_per_s/1e6,2)+" MB/s";
   $("pcie-note").textContent = "发送 "+format(s.gpu.pcie_tx_kb_per_s == null ? null : s.gpu.pcie_tx_kb_per_s/1000,2)+" MB/s · 周期采样可能遗漏突发";
-  $("sources").replaceChildren();
-  const labels = {system:"系统遥测",gpu:"GPU 遥测",kv:"vLLM 指标",sched:"eBPF 调度"};
-  for (const [key,status] of Object.entries(s.source_status)) {
-    const item=document.createElement("span"); item.className="source-item "+status.status;
-    item.title=status.error || "正常采集"; item.append(document.createElement("b"),document.createTextNode(labels[key]+" · "+({ok:"正常",failed:"失败",unavailable:"未接入"}[status.status] || status.status)));
-    $("sources").append(item);
-  }
+  renderSources(s.source_status);
   drawCharts();
 }
 function chart(id, series, maxValue) {
@@ -139,8 +145,9 @@ function renderTelemetry(telemetry){
 }
 async function inspect(id,scroll=false){
  try{
-  const data=await api("/api/v1/runs/"+encodeURIComponent(id));selected=id;
   if(contextId!==id)setContext(id,false);
+  const version=contextVersion;
+  const data=await api("/api/v1/runs/"+encodeURIComponent(id));if(version!==contextVersion)return;selected=id;
   $("detail-id").textContent=id;$("artifacts").replaceChildren();$("detail-metrics").replaceChildren();
   for(const filename of data.artifacts){
    const a=document.createElement("a");a.textContent=filename;a.href="/api/v1/runs/"+encodeURIComponent(id)+"/files/"+filename;a.target="_blank";$("artifacts").append(a);
@@ -206,10 +213,11 @@ async function initExperiments(){
    }
    $("cpu-blocks").disabled=$("policy").value!=="cpu_lru";
    $("cpu-blocks").min=$("policy").value==="cpu_lru"?"1":"0";
-   $("launch-message").textContent="已恢复本标签页的实验配置";
+   appliedAdvice=draft.recommendation_id||null;
+   $("launch-message").textContent=appliedAdvice?"已恢复实验草稿及建议关联":"已恢复本标签页的实验配置";
   }
  }catch(_){}
- const saveDraft=()=>{try{sessionStorage.setItem("tracekv-experiment-draft",JSON.stringify(formConfig()));}catch(_){}};
+ const saveDraft=()=>{try{sessionStorage.setItem("tracekv-experiment-draft",JSON.stringify({...formConfig(),recommendation_id:appliedAdvice}));}catch(_){}};
  $("policy").onchange=()=>{updatePolicy();saveDraft();};
  const draftChanged=()=>{advice=null;appliedAdvice=null;$("apply-advice").disabled=true;saveDraft();};
  $("run-form").addEventListener("change",draftChanged);
@@ -219,7 +227,7 @@ async function initExperiments(){
   $("recommend-button").disabled=true;
   try{
    if(!contextId)throw new Error("请先选择作为建议依据的具体实验。");
-   const snapshot=await api("/api/v1/runs/"+encodeURIComponent(contextId)+"/snapshot"),cfg=formConfig();
+   const [snapshot,source]=await Promise.all([api("/api/v1/runs/"+encodeURIComponent(contextId)+"/snapshot"),api("/api/v1/runs/"+encodeURIComponent(contextId))]),cfg=source.manifest.config;
    advice=await api("/api/v1/strategies/evaluate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({interface_version:"1.0",snapshot,current_config:{policy:cfg.policy,gpu_kv_blocks:cfg.gpu_kv_blocks,cpu_kv_blocks:cfg.cpu_kv_blocks}})});
    $("advice-text").textContent=advice.reason+" 来源："+advice.run_id+"；来源记录"+(advice.source_run_verified?"已核对":"未核对")+"，仅供下一轮对照。";$("apply-advice").disabled=!advice.source_run_verified;
   }catch(e){showError(e.message);}finally{$("recommend-button").disabled=false;}
@@ -268,10 +276,10 @@ function updateContextLinks(){
   const path=new URL(a.href,location.href).pathname;
   a.href=path+"?run_id="+encodeURIComponent(contextId||"host");
  }
- window.history.replaceState(null,"",location.pathname+"?run_id="+encodeURIComponent(contextId||"host"));
+ const query=new URLSearchParams(location.search);query.set("run_id",contextId||"host");window.history.replaceState(null,"",location.pathname+"?"+query);
 }
 function setContext(id,refresh=true){
- contextId=id;contextVersion++;timelineCursor=null;timelineData=null;appliedAdvice=null;if(page==="monitor"){$("timeline-start").value="";$("timeline-end").value="";}
+ contextId=id;contextVersion++;timelineCursor=null;timelineData=null;timelineFilters={};advice=null;if($("apply-advice"))$("apply-advice").disabled=true;if(page==="monitor"){$("timeline-start").value="";$("timeline-end").value="";}
  try{sessionStorage.setItem("tracekv-run-context",id||"host");}catch(_){}
  updateContextLinks();renderContexts();
  if(page==="runs"){selected=id;if(!id)$("detail").hidden=true;}
@@ -296,19 +304,19 @@ async function refreshMonitor(){
  const version=contextVersion,id=contextId;
  const data=await api(id?"/api/v1/runs/"+encodeURIComponent(id)+"/history":"/api/v1/history");
  if(version!==contextVersion)return;
- samples=data.samples;renderLive();
+ samples=data.samples;renderLive();if(!samples.length)renderSources(data.source_status||{});
  if(!samples.length)$("connection").textContent=id?"该实验未采样 · 查看采集配置或状态":"等待整机真实采样";
  if(id)await refreshTimeline(version);
  else{timelineData=null;$("timeline-status").textContent="请选择具体实验查看时间线。";$("timeline-events").replaceChildren();$("stage-rows").replaceChildren();$("timeline-quality").textContent="整机视图不混入任何实验的请求与事件。";$("timeline-page").textContent="";$("timeline-prev").disabled=true;$("timeline-next").disabled=true;drawEvents();}
 }
 function initTimelineControls(){
- $("timeline-filter").onsubmit=e=>{e.preventDefault();timelineCursor=0;refreshMonitor().catch(e=>showError(e.message));};
- $("timeline-reset").onclick=()=>{$("timeline-start").value="";$("timeline-end").value="";timelineCursor=null;refreshMonitor().catch(e=>showError(e.message));};
+ $("timeline-filter").onsubmit=e=>{e.preventDefault();showError("");timelineFilters={};for(const [id,key] of [["timeline-start","start"],["timeline-end","end"]])if($(id).value)timelineFilters[key]=new Date($(id).value).toISOString();timelineCursor=0;refreshMonitor().catch(e=>showError(e.message));};
+ $("timeline-reset").onclick=()=>{$("timeline-start").value="";$("timeline-end").value="";timelineFilters={};timelineCursor=null;showError("");refreshMonitor().catch(e=>showError(e.message));};
  for(const [id,key] of [["timeline-prev","previous_cursor"],["timeline-next","next_cursor"]])$(id).onclick=()=>{timelineCursor=timelineData?.[key];refreshMonitor().catch(e=>showError(e.message));};
 }
 async function refreshTimeline(version){
  const q=new URLSearchParams({limit:"200"});
- for(const [id,key] of [["timeline-start","start"],["timeline-end","end"]])if($(id).value)q.set(key,new Date($(id).value).toISOString());
+ for(const [key,value] of Object.entries(timelineFilters))q.set(key,value);
  if(timelineCursor!==null)q.set("cursor",timelineCursor);
  const data=await api("/api/v1/runs/"+encodeURIComponent(contextId)+"/timeline?"+q);
  if(version!==contextVersion)return;

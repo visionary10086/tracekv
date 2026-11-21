@@ -7,13 +7,14 @@ from uuid import uuid4
 from tools.run_experiment import write_json, load_jsonl
 
 
-def register(jobs, advice, snapshot):
+def register(jobs, advice, snapshot, current_config=None):
     key = "advice-"+uuid4().hex
     source = None
     try:
         out = jobs.resolve(snapshot["run_id"])
         manifest = json.loads((out/"manifest.json").read_text())
-        if any(row==snapshot for row in load_jsonl(out/"snapshots.jsonl")):
+        matches_config=current_config is None or all(manifest["config"].get(k)==v for k,v in current_config.items())
+        if matches_config and any(row==snapshot for row in load_jsonl(out/"snapshots.jsonl")):
             source={"run_id":out.name,"config":manifest["config"],
                     "snapshot_sha256":hashlib.sha256(json.dumps(snapshot,sort_keys=True).encode()).hexdigest()}
     except (OSError,ValueError,KeyError):
@@ -47,14 +48,19 @@ def assess(out,manifest,summary):
         source=Path(out).parent/record["source"]["run_id"]
         old_manifest=json.loads((source/"manifest.json").read_text())
         baseline=json.loads((source/"request_summary.json").read_text())
-        keys=("model_path","workload_path","requests","warmup","concurrency","max_tokens","seed","gpu_kv_blocks","trace_profile")
+        keys=("model_path","workload_path","requests","warmup","concurrency","max_tokens","seed","gpu_kv_blocks","trace_profile","slo_ttft_ms","slo_e2e_ms","slo_tpot_ms")
         same=all(manifest["config"].get(k)==old_manifest["config"].get(k) for k in keys)
-        same &= bool(manifest.get("model_weights_digest")) and manifest.get("model_weights_digest")==old_manifest.get("model_weights_digest")
+        identity_keys=("model_weights_digest","workload_sha256","config.json_sha256","tokenizer_config.json_sha256","git_commit")
+        result["identity_checks"]={k:bool(manifest.get(k)) and manifest.get(k)==old_manifest.get(k) for k in identity_keys}
+        result["identity_checks"]["clean_worktree"]=manifest.get("git_worktree_dirty") is False and old_manifest.get("git_worktree_dirty") is False
+        same &= all(result["identity_checks"].values())
         result["comparable_configuration"]=bool(same)
         for metric in ("client_ttft_ms_p95","client_e2e_ms_p95","successful_output_tokens_per_second"):
             a,b=baseline.get(metric),summary.get(metric)
             result[metric]={"baseline":a,"candidate":b,"relative_change_pct":(b-a)/a*100 if isinstance(a,(int,float)) and a and isinstance(b,(int,float)) else None}
-        if not same:
+        if manifest.get("status")!="completed" or old_manifest.get("status")!="completed":
+            result["reason"]="Both source and follow-up experiments must complete before assessing benefit."
+        elif not same:
             result["status"]="incomparable_configuration"
         elif min(baseline.get("successful_requests",0),summary.get("successful_requests",0))<100:
             result["reason"]="Short functional runs cannot establish a performance benefit; use repeated comparisons."

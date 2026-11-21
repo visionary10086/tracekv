@@ -307,3 +307,22 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(saved["members"][0]["status"],"pending")
         self.assertTrue((self.out/"report.md").exists())
         self.assertIsNone(jobs.reservation)
+
+    def test_advice_source_rejects_a_different_current_configuration(self):
+        jobs=Jobs(self.root)
+        snapshot={"run_id":self.out.name,"timestamp":"2026-11-21T00:00:00Z"}
+        append_json(self.out/"snapshots.jsonl",snapshot)
+        advice={"config_patch":{"policy":"gpu_only","gpu_kv_blocks":64,"cpu_kv_blocks":0}}
+        result=register(jobs,advice,snapshot,{"policy":"cpu_lru","cpu_kv_blocks":72})
+        self.assertFalse(result["source_run_verified"])
+        result=register(jobs,advice,snapshot,{"policy":"gpu_only","cpu_kv_blocks":0})
+        self.assertTrue(result["source_run_verified"])
+
+    def test_comparison_report_is_a_download(self):
+        folder=self.comparison_fixture()
+        summarize_comparison(folder,self.root)
+        controller=Comparisons(Jobs(self.root))
+        with patch("app.main.comparisons",controller):
+            response=TestClient(app).get("/api/v1/comparisons/cmp-test/files/report.md")
+        self.assertEqual(response.status_code,200)
+        self.assertIn("attachment",response.headers["content-disposition"])

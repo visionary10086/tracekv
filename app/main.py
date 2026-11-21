@@ -103,7 +103,7 @@ def strategies():
 def strategy_recommendation(request: StrategyRequest):
     try:
         from app.recommendations import register
-        return register(jobs,evaluate(request),request.snapshot)
+        return register(jobs,evaluate(request),request.snapshot,request.current_config.model_dump())
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
 
@@ -231,7 +231,7 @@ def comparison_file(comparison_id: str,filename: str):
         path=comparisons.resolve(comparison_id)/filename
         if not path.is_file():
             raise FileNotFoundError(filename)
-        return FileResponse(path,media_type="text/plain; charset=utf-8")
+        return FileResponse(path,filename=filename,media_type="text/plain; charset=utf-8")
     except (ValueError,OSError) as exc:
         raise HTTPException(404,"Artifact not found") from exc
 
