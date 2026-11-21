@@ -4,11 +4,12 @@ import json
 import os
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Query
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.jobs import ARTIFACTS, Jobs
+from app.comparisons import Comparisons
 from app import integrations
 from contracts.platform import EbpfBatch, CacheBatch, StrategyRequest, StrategyAdvice
 from policy.interface import STRATEGIES, evaluate
@@ -18,6 +19,10 @@ from policy.demo import recommend_policy
 STATIC = Path(__file__).parent / "static"
 monitor = Monitor(os.environ.get("TRACEKV_VLLM_METRICS_URL", "http://127.0.0.1:8000/metrics"))
 jobs = Jobs(os.environ.get("TRACEKV_RESULTS_DIR", str(Path(__file__).resolve().parents[1] / "results")))
+comparisons = Comparisons(jobs)
+# Keep background host sampling out of every managed comparison profile.
+from app.runtime import port_busy
+monitor.paused_when = lambda: jobs.reservation is not None or port_busy(8000)
 
 
 @asynccontextmanager
@@ -26,6 +31,7 @@ async def lifespan(app):
     try:
         yield
     finally:
+        comparisons.close()
         jobs.close()
         monitor.close()
 
@@ -96,7 +102,8 @@ def strategies():
 @app.post("/api/v1/strategies/evaluate", tags=["Cache strategy"], response_model=StrategyAdvice)
 def strategy_recommendation(request: StrategyRequest):
     try:
-        return evaluate(request)
+        from app.recommendations import register
+        return register(jobs,evaluate(request),request.snapshot,request.current_config.model_dump())
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
 
@@ -173,7 +180,7 @@ def environment():
         "models": jobs.models(),
         "workloads": [str(p.relative_to(root)) for p in sorted((root / "workloads").glob("*.jsonl"))],
         "metrics_url": os.environ.get("TRACEKV_VLLM_METRICS_URL", "http://127.0.0.1:8000/metrics"),
-        "limitations": ["eBPF 接收接口就绪，自动内核采集尚未启动", "整卡 GPU / 整机内存指标", "单进程单实验运行"],
+        "limitations": ["eBPF 自动采集取决于本机 bpftrace 与权限；能力检查不代表探针已挂载", "整卡 GPU / 整机内存指标", "单进程单实验运行"],
     }
 
 
@@ -185,6 +192,50 @@ def evaluate_policy(snapshot: dict):
         raise HTTPException(422, str(exc)) from exc
 
 
+@app.get("/api/v1/comparisons")
+def list_comparisons():
+    return {"comparisons":comparisons.list()}
+
+
+@app.post("/api/v1/comparisons",status_code=202)
+def start_comparison(config: dict):
+    try:
+        return comparisons.start(config)
+    except RuntimeError as exc:
+        raise HTTPException(409,str(exc)) from exc
+    except (ValueError,OSError,TypeError) as exc:
+        raise HTTPException(422,str(exc)) from exc
+
+
+@app.get("/api/v1/comparisons/{comparison_id}")
+def get_comparison(comparison_id: str):
+    try:
+        return comparisons.get(comparison_id)
+    except (ValueError,OSError) as exc:
+        raise HTTPException(404,"Comparison not found") from exc
+
+
+@app.post("/api/v1/comparisons/{comparison_id}/stop",status_code=202)
+def stop_comparison(comparison_id: str):
+    try:
+        return comparisons.stop(comparison_id)
+    except ValueError as exc:
+        raise HTTPException(409,str(exc)) from exc
+
+
+@app.get("/api/v1/comparisons/{comparison_id}/files/{filename}")
+def comparison_file(comparison_id: str,filename: str):
+    if filename not in ("manifest.json","summary.json","report.md"):
+        raise HTTPException(404,"Unknown artifact")
+    try:
+        path=comparisons.resolve(comparison_id)/filename
+        if not path.is_file():
+            raise FileNotFoundError(filename)
+        return FileResponse(path,filename=filename,media_type="text/plain; charset=utf-8")
+    except (ValueError,OSError) as exc:
+        raise HTTPException(404,"Artifact not found") from exc
+
+
 @app.get("/api/v1/runs")
 def list_runs():
     return {"runs": jobs.list()}
@@ -193,7 +244,11 @@ def list_runs():
 @app.post("/api/v1/runs", status_code=202)
 def start_run(config: dict):
     try:
-        return jobs.start(config)
+        from app.recommendations import resolve
+        config = dict(config)
+        recommendation_id = config.pop("recommendation_id",None)
+        recommendation = resolve(jobs,recommendation_id,config) if recommendation_id else None
+        return jobs.start(config,recommendation=recommendation)
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
     except (ValueError, OSError) as exc:
@@ -223,6 +278,40 @@ def get_run(run_id: str):
         return result
     except (ValueError, OSError) as exc:
         raise HTTPException(404, "Experiment not found") from exc
+
+
+@app.get("/api/v1/runs/{run_id}/timeline")
+def run_timeline(run_id: str, start: str | None = None, end: str | None = None,
+                 limit: int = Query(500,ge=1,le=2000), cursor: int | None = Query(None,ge=0)):
+    from app.timeline import build
+    try:
+        return build(jobs.resolve(run_id),start,end,limit,cursor)
+    except FileNotFoundError as exc:
+        raise HTTPException(404,"Experiment not found") from exc
+    except ValueError as exc:
+        raise HTTPException(422,str(exc)) from exc
+
+
+@app.get("/api/v1/runs/{run_id}/history")
+def run_history(run_id: str):
+    from app.timeline import records
+    from collections import deque
+    try:
+        out = jobs.resolve(run_id)
+        manifest = json.loads((out / "manifest.json").read_text())
+        rows = list(deque((r for r in records(out / "snapshots.jsonl") if not r.get("_invalid_line")),maxlen=180))
+        return {"run_id":run_id,"samples":rows,"interval_ms":manifest["config"]["sample_interval_ms"],
+                "status":manifest["status"],"source_status":manifest.get("sources",{})}
+    except (OSError,ValueError) as exc:
+        raise HTTPException(404,"Experiment not found") from exc
+
+
+@app.get("/api/v1/runs/{run_id}/snapshot")
+def run_snapshot(run_id: str):
+    rows = run_history(run_id)["samples"]
+    if not rows:
+        raise HTTPException(503,"This experiment has no sampled observations; inspect trace profile and source status")
+    return rows[-1]
 
 
 @app.get("/api/v1/runs/{run_id}/files/{filename:path}")

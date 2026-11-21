@@ -21,6 +21,7 @@ class Monitor:
         self.stop_event = threading.Event()
         self.thread = None
         self.system_state = None
+        self.paused_when = None
 
     def sample(self):
         system, self.system_state = collect_system_sample(
@@ -40,6 +41,8 @@ class Monitor:
                 kv = self.adapter.sample()
                 kv["counters"] = self.adapter.last_counters
                 kv["counter_deltas"] = self.adapter.last_deltas
+                kv["stage_histograms"] = self.adapter.last_histograms
+                kv["metric_labels"] = [{"name":r["name"],"labels":r["labels"]} for r in self.adapter.last_series if r["name"] in ("kv_cache_usage_perc","num_requests_running","num_requests_waiting","prefix_cache_queries_total","prefix_cache_hits_total")]
                 statuses["kv"] = {"status": "ok", "error": None} if any(
                     kv[key] is not None for key in ("usage_ratio", "prefix_hit_ratio", "running_requests")
                 ) else {"status": "unavailable", "error": "Endpoint returned no supported KV measurements"}
@@ -48,6 +51,8 @@ class Monitor:
                 self.adapter.previous = None
                 self.adapter.last_sample_monotonic = None
                 self.adapter.last_window_ms = None
+                self.adapter.previous_histograms = None
+                self.adapter.last_histograms = []
         result = {
             "schema_version": "0.1", "run_id": self.run_id,
             "timestamp": utc_now(),
@@ -64,6 +69,9 @@ class Monitor:
     def _loop(self):
         while not self.stop_event.is_set():
             started = time.monotonic()
+            if self.paused_when and self.paused_when():
+                self.stop_event.wait(self.interval)
+                continue
             try:
                 sample = self.sample()
                 with self.lock:

@@ -34,3 +34,16 @@ code{font-size:13px}
 @media(max-width:900px){.bridge-grid,#telemetry-detail{grid-template-columns:1fr}.archive-filters{flex-direction:column;gap:12px}.api-doc-link{display:none}nav{flex-wrap:nowrap;overflow-x:auto}nav a{white-space:nowrap}.aside-bottom{display:none}}
 
 @media(max-width:900px){nav a{font-size:14px;gap:8px;padding:8px 10px}}
+
+.context-bar{display:flex;gap:24px;align-items:center;padding:20px 0;border-bottom:1px solid var(--border)}
+.context-bar label{flex:1;min-width:0;color:var(--muted);font-size:14px}.context-bar select{margin-top:6px}
+.context-bar p{flex:1;overflow-wrap:anywhere}.batch-panel,.timeline-panel{margin-top:24px}
+fieldset{margin:0;border:1px solid var(--border);border-radius:6px;min-width:0}
+legend{font-size:14px;color:var(--muted)}.form-grid .check{display:flex;flex-direction:row;align-items:center;gap:8px}
+.check input{width:auto}.pager{margin-top:16px;flex-wrap:wrap}.form-actions{flex-wrap:wrap}
+#comparison-summary{margin-top:20px}#comparison-summary a{color:var(--mint);display:inline-block;margin:8px 18px 8px 0;overflow-wrap:anywhere}
+#comparison-summary table{margin:14px 0}#timeline-filter{align-items:end;flex-wrap:wrap}#timeline-filter label{min-width:190px}
+#event-chart{height:180px;margin:16px 0}#timeline-events td{white-space:normal;min-width:120px}
+#stage-rows td{white-space:normal;overflow-wrap:anywhere}#context-note,#batch-message,#timeline-page{font-size:14px}
+@media(max-width:900px){.context-bar{flex-direction:column;align-items:stretch;gap:8px}.context-bar p{margin:0}#timeline-filter{flex-direction:row}.form-grid{gap:12px}}
+@media(max-width:480px){.form-grid{grid-template-columns:1fr}.wide{grid-column:auto}header{gap:12px}.connection{max-width:65%;text-align:right}}

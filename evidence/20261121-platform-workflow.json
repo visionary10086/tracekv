@@ -1,0 +1,856 @@
+{
+  "recorded_at_utc": "2026-11-21T08:58:32.782385Z",
+  "scope": "Functional workflow acceptance; not a performance benefit study",
+  "platform": "Ubuntu 24.04 WSL / RTX 5070 Laptop / vLLM 0.11.2",
+  "source_commits": {
+    "repeated_comparison": "bc7db3c2e31739fa0f9340d0b8d26b22038f97bb",
+    "advice_followup": "e85bad2f2426671f61f6f470bd437e21709be06b"
+  },
+  "unit_tests_passed": 160,
+  "comparison_id": "cmp-20261121T083902-990e8df3",
+  "status": "completed",
+  "config": {
+    "base_config": {
+      "model_path": "/opt/tracekv/models/qwen2.5-0.5b-instruct",
+      "served_name": "tracekv-model",
+      "vllm_version": "0.11.2",
+      "workload_path": "/home/visionary/tracekv-integration-20261120/workloads/smoke.jsonl",
+      "policy": "gpu_only",
+      "requests": 3,
+      "warmup": 1,
+      "concurrency": 1,
+      "max_tokens": 32,
+      "gpu_kv_blocks": 64,
+      "cpu_kv_blocks": 0,
+      "max_model_len": 1024,
+      "max_num_seqs": 4,
+      "port": 8000,
+      "sample_interval_ms": 1000,
+      "timeout": 120,
+      "startup_timeout": 600,
+      "trace_profile": "sampling",
+      "seed": 0,
+      "slo_ttft_ms": 1000,
+      "slo_e2e_ms": 5000,
+      "slo_tpot_ms": null
+    },
+    "policies": [
+      "gpu_only",
+      "cpu_lru"
+    ],
+    "trace_profiles": [
+      "off",
+      "sampling"
+    ],
+    "repetitions": 3,
+    "cpu_kv_blocks": 72,
+    "order_seed": 42,
+    "effect_threshold_pct": 5
+  },
+  "completed_runs": 12,
+  "successful_requests": 36,
+  "slo_passed": 36,
+  "identity_checks": {
+    "workload_sha256": {
+      "consistent": true,
+      "values": [
+        "f366b123d20bf29145d5e04636c0ce65ca2071ce15feece36b0e7280381ca1a7"
+      ]
+    },
+    "config.json_sha256": {
+      "consistent": true,
+      "values": [
+        "18e18afcaccafade98daf13a54092927904649e1dd4eba8299ab717d5d94ff45"
+      ]
+    },
+    "tokenizer_config.json_sha256": {
+      "consistent": true,
+      "values": [
+        "5b5d4f65d0acd3b2d56a35b56d374a36cbc1c8fa5cf3b3febbbfabf22f359583"
+      ]
+    },
+    "model_weights_digest": {
+      "consistent": true,
+      "values": [
+        "cf7856b680fae2e850db865f80b2bb5c4e42190981662d3715b307c0ee1aa79c"
+      ]
+    },
+    "git_commit": {
+      "consistent": true,
+      "values": [
+        "bc7db3c2e31739fa0f9340d0b8d26b22038f97bb"
+      ]
+    },
+    "clean_worktree": {
+      "consistent": true
+    }
+  },
+  "cells": {
+    "cpu_lru/off": {
+      "completed": 3,
+      "failed_or_interrupted": 0,
+      "successful_requests": 9,
+      "output_consistency": true,
+      "comparison_result": "insufficient_data",
+      "descriptive_statistics": {
+        "client_ttft_ms_p95": {
+          "mean": 75.91110623373727,
+          "min": 45.0529567009653,
+          "max": 98.34699090042704,
+          "rounds": 3
+        },
+        "client_e2e_ms_p95": {
+          "mean": 1374.8843232001793,
+          "min": 1054.8766449008326,
+          "max": 1831.7962197002998,
+          "rounds": 3
+        },
+        "client_tpot_estimate_ms_p95": {
+          "mean": 41.903708351628175,
+          "min": 32.56789191614629,
+          "max": 55.91273711291163,
+          "rounds": 3
+        },
+        "successful_output_tokens_per_second": {
+          "mean": 27.420935325233437,
+          "min": 23.526614127374472,
+          "max": 31.558787822377965,
+          "rounds": 3
+        },
+        "successful_requests_per_second": {
+          "mean": 0.8569042289135449,
+          "min": 0.7352066914804523,
+          "max": 0.9862121194493114,
+          "rounds": 3
+        }
+      },
+      "slo_goodput_mean": 0.8569042289135449
+    },
+    "gpu_only/sampling": {
+      "completed": 3,
+      "failed_or_interrupted": 0,
+      "successful_requests": 9,
+      "output_consistency": null,
+      "comparison_result": "baseline",
+      "descriptive_statistics": {
+        "client_ttft_ms_p95": {
+          "mean": 55.84287783331092,
+          "min": 47.00893409881246,
+          "max": 73.17268000042532,
+          "rounds": 3
+        },
+        "client_e2e_ms_p95": {
+          "mean": 1215.377145999749,
+          "min": 1128.0367785000635,
+          "max": 1327.7339294994817,
+          "rounds": 3
+        },
+        "client_tpot_estimate_ms_p95": {
+          "mean": 37.86654472903421,
+          "min": 34.947181532246056,
+          "max": 41.50950768710191,
+          "rounds": 3
+        },
+        "successful_output_tokens_per_second": {
+          "mean": 27.147026530383513,
+          "min": 25.592317254605433,
+          "max": 28.656589627478574,
+          "rounds": 3
+        },
+        "successful_requests_per_second": {
+          "mean": 0.8483445790744848,
+          "min": 0.7997599142064198,
+          "max": 0.8955184258587054,
+          "rounds": 3
+        }
+      },
+      "slo_goodput_mean": 0.8483445790744848
+    },
+    "cpu_lru/sampling": {
+      "completed": 3,
+      "failed_or_interrupted": 0,
+      "successful_requests": 9,
+      "output_consistency": true,
+      "comparison_result": "insufficient_data",
+      "descriptive_statistics": {
+        "client_ttft_ms_p95": {
+          "mean": 46.461967033428664,
+          "min": 41.306709299715294,
+          "max": 49.411717799375765,
+          "rounds": 3
+        },
+        "client_e2e_ms_p95": {
+          "mean": 1180.8568031665952,
+          "min": 1079.0744149009697,
+          "max": 1298.3331476985768,
+          "rounds": 3
+        },
+        "client_tpot_estimate_ms_p95": {
+          "mean": 36.607121462359935,
+          "min": 33.24345671933242,
+          "max": 40.601612032262516,
+          "rounds": 3
+        },
+        "successful_output_tokens_per_second": {
+          "mean": 29.547611614682907,
+          "min": 28.41873465093905,
+          "max": 31.110897596726048,
+          "rounds": 3
+        },
+        "successful_requests_per_second": {
+          "mean": 0.9233628629588408,
+          "min": 0.8880854578418453,
+          "max": 0.972215549897689,
+          "rounds": 3
+        }
+      },
+      "slo_goodput_mean": 0.9233628629588408
+    },
+    "gpu_only/off": {
+      "completed": 3,
+      "failed_or_interrupted": 0,
+      "successful_requests": 9,
+      "output_consistency": null,
+      "comparison_result": "baseline",
+      "descriptive_statistics": {
+        "client_ttft_ms_p95": {
+          "mean": 61.36260220027907,
+          "min": 34.976643300069554,
+          "max": 75.39039370076352,
+          "rounds": 3
+        },
+        "client_e2e_ms_p95": {
+          "mean": 1287.521092667157,
+          "min": 1091.7269399014913,
+          "max": 1630.884923999838,
+          "rounds": 3
+        },
+        "client_tpot_estimate_ms_p95": {
+          "mean": 39.93143473118482,
+          "min": 32.77471226128616,
+          "max": 51.50824519032833,
+          "rounds": 3
+        },
+        "successful_output_tokens_per_second": {
+          "mean": 29.28663734935736,
+          "min": 24.046013905161605,
+          "max": 31.9572891256886,
+          "rounds": 3
+        },
+        "successful_requests_per_second": {
+          "mean": 0.9152074171674175,
+          "min": 0.7514379345363001,
+          "max": 0.9986652851777688,
+          "rounds": 3
+        }
+      },
+      "slo_goodput_mean": 0.9152074171674175
+    }
+  },
+  "members": [
+    {
+      "repeat": 1,
+      "policy": "cpu_lru",
+      "trace_profile": "off",
+      "status": "completed",
+      "run_id": "20261121T083902Z-cpu-lru-924bc01a28",
+      "successful_requests": 3,
+      "slo_passed": 3,
+      "source_commit": "bc7db3c2e31739fa0f9340d0b8d26b22038f97bb",
+      "git_worktree_dirty": false,
+      "source_status": {
+        "sched": {
+          "status": "disabled",
+          "error": "Disabled by trace_profile=off"
+        },
+        "gpu": {
+          "status": "disabled",
+          "error": "Disabled by trace_profile=off"
+        },
+        "system": {
+          "status": "disabled",
+          "error": "Disabled by trace_profile=off"
+        },
+        "kv": {
+          "status": "disabled",
+          "error": "Disabled by trace_profile=off"
+        }
+      },
+      "stage_groups": 0,
+      "artifact_sha256": {
+        "manifest.json": "16448be601bf15e653003869c97ef9a97d0fbc8edb4d77aee4a189f39f612531",
+        "requests.jsonl": "14d73b3884ec277edd1d41f1eb214a676e0517c95143dffc12fc6f99bd6d30cc",
+        "request_summary.json": "1c6a38cd8d52e8c72e2f3fe5c9f355239cf03511f1909a90f3a118a4b13dcfd9",
+        "stage_summary.json": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+        "report.md": "c2c82e560b1562e90ced287f3b0c94055ffd6c496d00273ee862765de22d8682"
+      }
+    },
+    {
+      "repeat": 1,
+      "policy": "gpu_only",
+      "trace_profile": "sampling",
+      "status": "completed",
+      "run_id": "20261121T084005Z-gpu-only-ec4f187f04",
+      "successful_requests": 3,
+      "slo_passed": 3,
+      "source_commit": "bc7db3c2e31739fa0f9340d0b8d26b22038f97bb",
+      "git_worktree_dirty": false,
+      "source_status": {
+        "sched": {
+          "status": "unavailable",
+          "error": "eBPF live collection not connected in this milestone",
+          "sample_count": 0,
+          "failed_sample_count": 0,
+          "first_sample_utc": null,
+          "last_sample_utc": null
+        },
+        "gpu": {
+          "status": "ok",
+          "error": null,
+          "sample_count": 6,
+          "failed_sample_count": 0,
+          "first_sample_utc": "2026-11-21T08:40:51.378359Z",
+          "last_sample_utc": "2026-11-21T08:40:55.199541Z"
+        },
+        "system": {
+          "status": "ok",
+          "error": null,
+          "sample_count": 6,
+          "failed_sample_count": 0,
+          "first_sample_utc": "2026-11-21T08:40:51.378359Z",
+          "last_sample_utc": "2026-11-21T08:40:55.199541Z"
+        },
+        "kv": {
+          "status": "ok",
+          "error": null,
+          "sample_count": 6,
+          "failed_sample_count": 0,
+          "first_sample_utc": "2026-11-21T08:40:51.378359Z",
+          "last_sample_utc": "2026-11-21T08:40:55.199541Z"
+        }
+      },
+      "stage_groups": 8,
+      "artifact_sha256": {
+        "manifest.json": "76ff4efbbdbf094714172dcdee3babd2c557de6fe20b8a5fc61174ef2a98a62a",
+        "requests.jsonl": "5e92989721c0be7ce8a40e964642cc0024e947971f7b7d3e18fbd57af86d1595",
+        "request_summary.json": "5e90d11234dacea3cb4df465279b5562b78cd7cfec250cf8b194f04659c65143",
+        "stage_summary.json": "ac10d02faaca85b92b3ffb3f81e08731a89f3170411f5c12ef9108ea502352e6",
+        "report.md": "831c2e596d4af778777c4c0bc8cc6e967bc7de11bf991c8c5d3fa7dd44f01090"
+      }
+    },
+    {
+      "repeat": 1,
+      "policy": "cpu_lru",
+      "trace_profile": "sampling",
+      "status": "completed",
+      "run_id": "20261121T084057Z-cpu-lru-065ffeb1ee",
+      "successful_requests": 3,
+      "slo_passed": 3,
+      "source_commit": "bc7db3c2e31739fa0f9340d0b8d26b22038f97bb",
+      "git_worktree_dirty": false,
+      "source_status": {
+        "sched": {
+          "status": "unavailable",
+          "error": "eBPF live collection not connected in this milestone",
+          "sample_count": 0,
+          "failed_sample_count": 0,
+          "first_sample_utc": null,
+          "last_sample_utc": null
+        },
+        "gpu": {
+          "status": "ok",
+          "error": null,
+          "sample_count": 6,
+          "failed_sample_count": 0,
+          "first_sample_utc": "2026-11-21T08:41:39.761445Z",
+          "last_sample_utc": "2026-11-21T08:41:43.208891Z"
+        },
+        "system": {
+          "status": "ok",
+          "error": null,
+          "sample_count": 6,
+          "failed_sample_count": 0,
+          "first_sample_utc": "2026-11-21T08:41:39.761445Z",
+          "last_sample_utc": "2026-11-21T08:41:43.208891Z"
+        },
+        "kv": {
+          "status": "ok",
+          "error": null,
+          "sample_count": 6,
+          "failed_sample_count": 0,
+          "first_sample_utc": "2026-11-21T08:41:39.761445Z",
+          "last_sample_utc": "2026-11-21T08:41:43.208891Z"
+        }
+      },
+      "stage_groups": 8,
+      "artifact_sha256": {
+        "manifest.json": "19a6354c6432b714a85ac2ddd6389419c7d0da68aad564799238e1a0f82495fe",
+        "requests.jsonl": "fd10a0ccfa2930beb7f4e932a8cdd0a78dce17e6a9d69922f86472d82b93e114",
+        "request_summary.json": "bfffd8f8b74b28709659f10526bc0f9334a8beb390bb05a7dd73fd21c23fdd05",
+        "stage_summary.json": "1ea5e934f41e4b1d8b58af19e9c347b246907913ba0106e9c9ee375fdaa5c210",
+        "report.md": "01295b88fa4476ce11af43ed6a58aab187994b32b24b52fa1421410da94caaba"
+      }
+    },
+    {
+      "repeat": 1,
+      "policy": "gpu_only",
+      "trace_profile": "off",
+      "status": "completed",
+      "run_id": "20261121T084145Z-gpu-only-fbd0de5589",
+      "successful_requests": 3,
+      "slo_passed": 3,
+      "source_commit": "bc7db3c2e31739fa0f9340d0b8d26b22038f97bb",
+      "git_worktree_dirty": false,
+      "source_status": {
+        "sched": {
+          "status": "disabled",
+          "error": "Disabled by trace_profile=off"
+        },
+        "gpu": {
+          "status": "disabled",
+          "error": "Disabled by trace_profile=off"
+        },
+        "system": {
+          "status": "disabled",
+          "error": "Disabled by trace_profile=off"
+        },
+        "kv": {
+          "status": "disabled",
+          "error": "Disabled by trace_profile=off"
+        }
+      },
+      "stage_groups": 0,
+      "artifact_sha256": {
+        "manifest.json": "a16becc9d4ae9db39f2fcb12c91d4bdd7bdb5a3a735c89a91adccc6fb3bfea07",
+        "requests.jsonl": "cc05ace294ad06686cd7421db35bfae7d834e227ed5db11c14a6ed2328cf2f1a",
+        "request_summary.json": "ab83b8bf5a3c61236cde4c943f327be11233eecba6612aaa998fe47ac2287a35",
+        "stage_summary.json": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+        "report.md": "df980af5955b0b138c79388f895542b90f9df325a284c19c50dc9713fa638d3a"
+      }
+    },
+    {
+      "repeat": 2,
+      "policy": "cpu_lru",
+      "trace_profile": "sampling",
+      "status": "completed",
+      "run_id": "20261121T084229Z-cpu-lru-7cd796b48b",
+      "successful_requests": 3,
+      "slo_passed": 3,
+      "source_commit": "bc7db3c2e31739fa0f9340d0b8d26b22038f97bb",
+      "git_worktree_dirty": false,
+      "source_status": {
+        "sched": {
+          "status": "unavailable",
+          "error": "eBPF live collection not connected in this milestone",
+          "sample_count": 0,
+          "failed_sample_count": 0,
+          "first_sample_utc": null,
+          "last_sample_utc": null
+        },
+        "gpu": {
+          "status": "ok",
+          "error": null,
+          "sample_count": 5,
+          "failed_sample_count": 0,
+          "first_sample_utc": "2026-11-21T08:43:12.812065Z",
+          "last_sample_utc": "2026-11-21T08:43:15.967865Z"
+        },
+        "system": {
+          "status": "ok",
+          "error": null,
+          "sample_count": 5,
+          "failed_sample_count": 0,
+          "first_sample_utc": "2026-11-21T08:43:12.812065Z",
+          "last_sample_utc": "2026-11-21T08:43:15.967865Z"
+        },
+        "kv": {
+          "status": "ok",
+          "error": null,
+          "sample_count": 5,
+          "failed_sample_count": 0,
+          "first_sample_utc": "2026-11-21T08:43:12.812065Z",
+          "last_sample_utc": "2026-11-21T08:43:15.967865Z"
+        }
+      },
+      "stage_groups": 8,
+      "artifact_sha256": {
+        "manifest.json": "76fae55e6c58a558eb4e85d7ec736539c827c6aa81e747b72b23c8f4bc618ece",
+        "requests.jsonl": "3e221371b2edb076d2818c239afafcdc8dc62421348708338aa1e76931ae749d",
+        "request_summary.json": "9c1bddbd4ac94d3cedaad92546987e5a3fae2a9d0942cc37d2ec3c17095fbc13",
+        "stage_summary.json": "ee30d85096b603eba3dd81328f4732bdda55443381072d0a1aaf9156f96e9712",
+        "report.md": "8e70b3a2bb702423ff85f115eba283569c8fb83df62e0d0cf082dd6458885f34"
+      }
+    },
+    {
+      "repeat": 2,
+      "policy": "cpu_lru",
+      "trace_profile": "off",
+      "status": "completed",
+      "run_id": "20261121T084317Z-cpu-lru-054fd31f3f",
+      "successful_requests": 3,
+      "slo_passed": 3,
+      "source_commit": "bc7db3c2e31739fa0f9340d0b8d26b22038f97bb",
+      "git_worktree_dirty": false,
+      "source_status": {
+        "sched": {
+          "status": "disabled",
+          "error": "Disabled by trace_profile=off"
+        },
+        "gpu": {
+          "status": "disabled",
+          "error": "Disabled by trace_profile=off"
+        },
+        "system": {
+          "status": "disabled",
+          "error": "Disabled by trace_profile=off"
+        },
+        "kv": {
+          "status": "disabled",
+          "error": "Disabled by trace_profile=off"
+        }
+      },
+      "stage_groups": 0,
+      "artifact_sha256": {
+        "manifest.json": "dabb05306a1cf5d139aa64905bcbd176e7a5e66974cb1a4d7424c56224a68924",
+        "requests.jsonl": "f132f79e6f236569372a618fcadd4c2d5f021a533354cf57634b9cbd624a3b3d",
+        "request_summary.json": "a8351556699983e95d21443a635c12257347472ff8d5d27b2837fab8509148db",
+        "stage_summary.json": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+        "report.md": "08f9e337e5d9723e41d99e8458f61e08f60129d47da184ff527a89ff82d96d5b"
+      }
+    },
+    {
+      "repeat": 2,
+      "policy": "gpu_only",
+      "trace_profile": "off",
+      "status": "completed",
+      "run_id": "20261121T084404Z-gpu-only-e4c1a24f1b",
+      "successful_requests": 3,
+      "slo_passed": 3,
+      "source_commit": "bc7db3c2e31739fa0f9340d0b8d26b22038f97bb",
+      "git_worktree_dirty": false,
+      "source_status": {
+        "sched": {
+          "status": "disabled",
+          "error": "Disabled by trace_profile=off"
+        },
+        "gpu": {
+          "status": "disabled",
+          "error": "Disabled by trace_profile=off"
+        },
+        "system": {
+          "status": "disabled",
+          "error": "Disabled by trace_profile=off"
+        },
+        "kv": {
+          "status": "disabled",
+          "error": "Disabled by trace_profile=off"
+        }
+      },
+      "stage_groups": 0,
+      "artifact_sha256": {
+        "manifest.json": "48dd36a067984344655a3616087dc00d04c9033cdf66847f4f0833de4f3cac9f",
+        "requests.jsonl": "7778ca168847e2cfb8f535ed78bdb53360f8ed23431005ac7170c3c0ecb33077",
+        "request_summary.json": "7b975631f6865420f0b232d1da3ee0f16482ec01d693f74a970069b9db939892",
+        "stage_summary.json": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+        "report.md": "362454608aa4d4d593a360ca500d6e8e764d1a4238b11a918873118e5025817f"
+      }
+    },
+    {
+      "repeat": 2,
+      "policy": "gpu_only",
+      "trace_profile": "sampling",
+      "status": "completed",
+      "run_id": "20261121T084452Z-gpu-only-01091ba6c1",
+      "successful_requests": 3,
+      "slo_passed": 3,
+      "source_commit": "bc7db3c2e31739fa0f9340d0b8d26b22038f97bb",
+      "git_worktree_dirty": false,
+      "source_status": {
+        "sched": {
+          "status": "unavailable",
+          "error": "eBPF live collection not connected in this milestone",
+          "sample_count": 0,
+          "failed_sample_count": 0,
+          "first_sample_utc": null,
+          "last_sample_utc": null
+        },
+        "gpu": {
+          "status": "ok",
+          "error": null,
+          "sample_count": 6,
+          "failed_sample_count": 0,
+          "first_sample_utc": "2026-11-21T08:45:34.342131Z",
+          "last_sample_utc": "2026-11-21T08:45:37.762035Z"
+        },
+        "system": {
+          "status": "ok",
+          "error": null,
+          "sample_count": 6,
+          "failed_sample_count": 0,
+          "first_sample_utc": "2026-11-21T08:45:34.342131Z",
+          "last_sample_utc": "2026-11-21T08:45:37.762035Z"
+        },
+        "kv": {
+          "status": "ok",
+          "error": null,
+          "sample_count": 6,
+          "failed_sample_count": 0,
+          "first_sample_utc": "2026-11-21T08:45:34.342131Z",
+          "last_sample_utc": "2026-11-21T08:45:37.762035Z"
+        }
+      },
+      "stage_groups": 8,
+      "artifact_sha256": {
+        "manifest.json": "e0967ac0df2ad9cc8d0a38856f29cbd288674e93066a9c9b53441fd5f2787038",
+        "requests.jsonl": "a5ed61ac9f6ce269a7933c1d638d37ce30a731a28592ba9eb962a639e4cb7aa4",
+        "request_summary.json": "7278a7a218a7bd33a29417ccf5d715db1a8eca62c15a4743a9cd98b19156e95a",
+        "stage_summary.json": "2931bc39599f14d773012afced5ff86399eb5ab67fb490ef8635a340139c5297",
+        "report.md": "59c6f0c58d78e10b19984c5730e8bb358c249929298bceff3b6a44a3e7cfadfd"
+      }
+    },
+    {
+      "repeat": 3,
+      "policy": "gpu_only",
+      "trace_profile": "sampling",
+      "status": "completed",
+      "run_id": "20261121T084539Z-gpu-only-097dfb070c",
+      "successful_requests": 3,
+      "slo_passed": 3,
+      "source_commit": "bc7db3c2e31739fa0f9340d0b8d26b22038f97bb",
+      "git_worktree_dirty": false,
+      "source_status": {
+        "sched": {
+          "status": "unavailable",
+          "error": "eBPF live collection not connected in this milestone",
+          "sample_count": 0,
+          "failed_sample_count": 0,
+          "first_sample_utc": null,
+          "last_sample_utc": null
+        },
+        "gpu": {
+          "status": "ok",
+          "error": null,
+          "sample_count": 6,
+          "failed_sample_count": 0,
+          "first_sample_utc": "2026-11-21T08:46:22.351287Z",
+          "last_sample_utc": "2026-11-21T08:46:25.953519Z"
+        },
+        "system": {
+          "status": "ok",
+          "error": null,
+          "sample_count": 6,
+          "failed_sample_count": 0,
+          "first_sample_utc": "2026-11-21T08:46:22.351287Z",
+          "last_sample_utc": "2026-11-21T08:46:25.953519Z"
+        },
+        "kv": {
+          "status": "ok",
+          "error": null,
+          "sample_count": 6,
+          "failed_sample_count": 0,
+          "first_sample_utc": "2026-11-21T08:46:22.351287Z",
+          "last_sample_utc": "2026-11-21T08:46:25.953519Z"
+        }
+      },
+      "stage_groups": 8,
+      "artifact_sha256": {
+        "manifest.json": "66cd9790bedb9128e526ea17690c4a43031e7bf2aeadf6d81d19b4e8d9b5f0eb",
+        "requests.jsonl": "30b0dd99f3f51d2c7e3a971829834f8163070a6bd39f91c9f04b36e981d5e236",
+        "request_summary.json": "69b4a4262a773eead9dbf5623c1b9c12ea0ef3f358b3fadfb8d78a37ed959d2d",
+        "stage_summary.json": "b6388b2bd12ecf163427d50ef4cc818bea135d50521a68a8029dcd09710a8e4c",
+        "report.md": "cb0414045b73dc27a5da1c6317c1cc666d3025f8dbecaa14d2e33d61d2f680f4"
+      }
+    },
+    {
+      "repeat": 3,
+      "policy": "cpu_lru",
+      "trace_profile": "sampling",
+      "status": "completed",
+      "run_id": "20261121T084628Z-cpu-lru-5d9101d715",
+      "successful_requests": 3,
+      "slo_passed": 3,
+      "source_commit": "bc7db3c2e31739fa0f9340d0b8d26b22038f97bb",
+      "git_worktree_dirty": false,
+      "source_status": {
+        "sched": {
+          "status": "unavailable",
+          "error": "eBPF live collection not connected in this milestone",
+          "sample_count": 0,
+          "failed_sample_count": 0,
+          "first_sample_utc": null,
+          "last_sample_utc": null
+        },
+        "gpu": {
+          "status": "ok",
+          "error": null,
+          "sample_count": 6,
+          "failed_sample_count": 0,
+          "first_sample_utc": "2026-11-21T08:47:09.910869Z",
+          "last_sample_utc": "2026-11-21T08:47:13.275096Z"
+        },
+        "system": {
+          "status": "ok",
+          "error": null,
+          "sample_count": 6,
+          "failed_sample_count": 0,
+          "first_sample_utc": "2026-11-21T08:47:09.910869Z",
+          "last_sample_utc": "2026-11-21T08:47:13.275096Z"
+        },
+        "kv": {
+          "status": "ok",
+          "error": null,
+          "sample_count": 6,
+          "failed_sample_count": 0,
+          "first_sample_utc": "2026-11-21T08:47:09.910869Z",
+          "last_sample_utc": "2026-11-21T08:47:13.275096Z"
+        }
+      },
+      "stage_groups": 8,
+      "artifact_sha256": {
+        "manifest.json": "7edb068d886efc9824db68a605b542e7ee4b05a4adecee78ad883855bfc91bb8",
+        "requests.jsonl": "cbe02d48d08e742325d24eb4572f56b118b1296cb90ed91e98d6e6a991f4b592",
+        "request_summary.json": "5482fa57f4f06a3c4f5f974b16d9c5848f1ae3f6c979032aee751416ce922b92",
+        "stage_summary.json": "9da9521b614af74772c413fc448e40ef178e8b4d021400e38f55de2f10584f50",
+        "report.md": "ce0bc4a6e16c795b916d7a744e2ade8a3e532669f60d4d5050158b1602dcd657"
+      }
+    },
+    {
+      "repeat": 3,
+      "policy": "cpu_lru",
+      "trace_profile": "off",
+      "status": "completed",
+      "run_id": "20261121T084715Z-cpu-lru-400b36d16a",
+      "successful_requests": 3,
+      "slo_passed": 3,
+      "source_commit": "bc7db3c2e31739fa0f9340d0b8d26b22038f97bb",
+      "git_worktree_dirty": false,
+      "source_status": {
+        "sched": {
+          "status": "disabled",
+          "error": "Disabled by trace_profile=off"
+        },
+        "gpu": {
+          "status": "disabled",
+          "error": "Disabled by trace_profile=off"
+        },
+        "system": {
+          "status": "disabled",
+          "error": "Disabled by trace_profile=off"
+        },
+        "kv": {
+          "status": "disabled",
+          "error": "Disabled by trace_profile=off"
+        }
+      },
+      "stage_groups": 0,
+      "artifact_sha256": {
+        "manifest.json": "438b6906f78ea277220468f9bd99dac600b66db4a7785ee7b64ac9ede3d9560b",
+        "requests.jsonl": "7d4049ea35285b902f24c7ebedee1f82e3309b4d901a801fb893a666f00874e4",
+        "request_summary.json": "80aabc6a31c1a419568b66a1caa67ce7e13ceb039daba42542cc4d55ce721750",
+        "stage_summary.json": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+        "report.md": "0405cfb76379f86647afe37708491d574a6684ddaf688229840bf5b8457cff8b"
+      }
+    },
+    {
+      "repeat": 3,
+      "policy": "gpu_only",
+      "trace_profile": "off",
+      "status": "completed",
+      "run_id": "20261121T084803Z-gpu-only-5091003c4c",
+      "successful_requests": 3,
+      "slo_passed": 3,
+      "source_commit": "bc7db3c2e31739fa0f9340d0b8d26b22038f97bb",
+      "git_worktree_dirty": false,
+      "source_status": {
+        "sched": {
+          "status": "disabled",
+          "error": "Disabled by trace_profile=off"
+        },
+        "gpu": {
+          "status": "disabled",
+          "error": "Disabled by trace_profile=off"
+        },
+        "system": {
+          "status": "disabled",
+          "error": "Disabled by trace_profile=off"
+        },
+        "kv": {
+          "status": "disabled",
+          "error": "Disabled by trace_profile=off"
+        }
+      },
+      "stage_groups": 0,
+      "artifact_sha256": {
+        "manifest.json": "d0cc2821f203375bd9e6f991de806e94335d0620891f2aa8af430cc527caa0bf",
+        "requests.jsonl": "89f733f909b378ad4091f20da59f4666d4f7d178d90428c09fbd363ede01914d",
+        "request_summary.json": "ce1f505aee7d61f8d0369dd165100e41cbb049f05a9d55f9f19d4090b73cbbb3",
+        "stage_summary.json": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+        "report.md": "6ce70afc9606944fe79eb03dab8207f0c115d930f22417262f8a90ed3d1617c7"
+      }
+    }
+  ],
+  "advice_followup": {
+    "run_id": "20261121T085312Z-cpu-lru-3a75511cfd",
+    "status": "completed",
+    "successful_requests": 3,
+    "assessment": {
+      "recommendation_id": "advice-5d6972dab0094277be593d8d84cd6ab6",
+      "source_run_id": "20261121T084057Z-cpu-lru-065ffeb1ee",
+      "status": "incomparable_configuration",
+      "causality_established": false,
+      "identity_checks": {
+        "model_weights_digest": true,
+        "workload_sha256": true,
+        "config.json_sha256": true,
+        "tokenizer_config.json_sha256": true,
+        "git_commit": false,
+        "clean_worktree": true
+      },
+      "comparable_configuration": false,
+      "client_ttft_ms_p95": {
+        "baseline": 41.306709299715294,
+        "candidate": 76.61502309929347,
+        "relative_change_pct": 85.47839902565546
+      },
+      "client_e2e_ms_p95": {
+        "baseline": 1298.3331476985768,
+        "candidate": 1308.190383299734,
+        "relative_change_pct": 0.7592223628142145
+      },
+      "successful_output_tokens_per_second": {
+        "baseline": 28.41873465093905,
+        "candidate": 28.628545621367575,
+        "relative_change_pct": 0.7382839982342121
+      }
+    }
+  },
+  "cancellation": {
+    "run_id": "20261121T085459Z-cpu-lru-c9a45999c9",
+    "status": "interrupted",
+    "report_saved": true,
+    "error": "Experiment cancelled"
+  },
+  "ebpf_unavailable": {
+    "run_id": "20261121T085548Z-gpu-only-b6e3895776",
+    "status": "failed",
+    "error": "eBPF required: bpftrace is not installed",
+    "inference_launched": false,
+    "report_saved": true
+  },
+  "browser_checks": [
+    "Shared run_id across three separate pages",
+    "Experimental draft survives navigation",
+    "Advice provenance survives navigation and enters run manifest",
+    "off profile leaves gauges empty",
+    "UTC event timeline and stage labels",
+    "Empty-window filter and reset",
+    "Comparison table, report links and member links",
+    "No captured JavaScript console errors"
+  ],
+  "limitations": [
+    "Three requests per round: CPU policy benefit remains insufficient_data.",
+    "bpftrace not installed; no real kernel attachment evidence.",
+    "off retains request logging and offload hooks.",
+    "Full raw results remain in Linux results/<run_id>; this file contains summaries and artifact digests."
+  ]
+}

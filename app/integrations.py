@@ -40,11 +40,13 @@ def contracts():
 
 
 def capabilities():
-    return {"interface_version": "1.0", "cache": {"ingest_ready": True, "source": "vLLM/cache module"},
-            "ebpf": {"ingest_ready": True, "bpftrace_found": shutil.which("bpftrace") is not None,
-                     "automatic_start": False, "status": "external_collector_required",
-                     "message": "接收接口已就绪；需外部采集器提交真实事件。"},
-            "contracts_url": "/api/v1/interfaces", "docs_url": "/docs"}
+    from app.collectors import capability
+    cap = capability()
+    return {"interface_version":"1.0","cache":{"ingest_ready":True,"source":"vLLM/cache module"},
+            "ebpf":dict(cap,ingest_ready=True,automatic_start="when_requested_and_capable",
+                        status="ready_to_attempt" if cap["can_attempt"] else "unavailable",
+                        message="可请求受管采集；需实机验证挂载。" if cap["can_attempt"] else "受管采集未就绪："+str(cap["reason"])),
+            "trace_profiles":["off","sampling","ebpf"],"contracts_url":"/api/v1/interfaces","docs_url":"/docs"}
 
 
 def _folder(run_dir, source):

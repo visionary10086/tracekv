@@ -42,14 +42,20 @@ def get_resource(url, timeout):
         return response.read()
 
 
-def request_one(base_url, model, item, index, max_tokens, timeout):
+def request_one(base_url, model, item, index, max_tokens, timeout, seed=0):
     start = time.perf_counter()
+    wall_start = time.time()
+    def stamp():
+        return datetime.fromtimestamp(wall_start + time.perf_counter() - start, timezone.utc).isoformat().replace("+00:00", "Z")
+    content_offsets = []
     result = {"request_id": index, "case_id": item["id"],
               "started_at_utc": datetime.now(timezone.utc).isoformat(),
               "success": False, "ttft_ms": None, "completion_tokens": None,
-              "prompt_tokens": None, "output_text": "", "finish_reason": None}
+              "prompt_tokens": None, "output_text": "", "finish_reason": None,
+              "first_content_at_utc": None, "last_content_at_utc": None, "stream_done_at_utc": None,
+              "client_tpot_estimate_ms": None, "inter_content_chunk_gaps_ms": []}
     payload = {"model": model, "messages": item["messages"], "temperature": 0,
-               "max_tokens": max_tokens, "stream": True,
+               "max_tokens": max_tokens, "stream": True, "seed": seed,
                "stream_options": {"include_usage": True}}
     request = urllib.request.Request(base_url + "/v1/chat/completions",
                                      data=json.dumps(payload).encode("utf-8"),
@@ -60,6 +66,7 @@ def request_one(base_url, model, item, index, max_tokens, timeout):
             for event in events(response):
                 if event.strip() == "[DONE]":
                     done = True
+                    result["stream_done_at_utc"] = stamp()
                     break
                 obj = json.loads(event)
                 if obj.get("error"):
@@ -77,6 +84,10 @@ def request_one(base_url, model, item, index, max_tokens, timeout):
                     if isinstance(content, str) and content:
                         if result["ttft_ms"] is None:
                             result["ttft_ms"] = (time.perf_counter() - start) * 1000
+                        observed = time.perf_counter() - start
+                        content_offsets.append(observed)
+                        result["first_content_at_utc"] = result["first_content_at_utc"] or stamp()
+                        result["last_content_at_utc"] = stamp()
                         result["output_text"] += content
                     if choice.get("finish_reason") is not None:
                         result["finish_reason"] = choice["finish_reason"]
@@ -90,6 +101,11 @@ def request_one(base_url, model, item, index, max_tokens, timeout):
     except (OSError, ValueError, urllib.error.URLError) as exc:
         result["error"] = f"{type(exc).__name__}: {exc}"
     result["e2e_ms"] = (time.perf_counter() - start) * 1000
+    result["finished_at_utc"] = stamp()
+    result["inter_content_chunk_gaps_ms"] = [(b-a)*1000 for a,b in zip(content_offsets,content_offsets[1:])]
+    tokens = result["completion_tokens"]
+    if result["success"] and tokens is not None and tokens > 1 and len(content_offsets) >= 2:
+        result["client_tpot_estimate_ms"] = (content_offsets[-1]-content_offsets[0])*1000/(tokens-1)
     return result
 
 
@@ -108,7 +124,12 @@ def summarize(records, elapsed):
     e2e = [r["e2e_ms"] for r in good]
     complete_usage = bool(good) and all(r["completion_tokens"] is not None for r in good)
     total_tokens = sum(r["completion_tokens"] for r in good) if complete_usage else None
+    tpot = [r["client_tpot_estimate_ms"] for r in good if r.get("client_tpot_estimate_ms") is not None]
+    gaps = [gap for r in good for gap in r.get("inter_content_chunk_gaps_ms", [])]
     return {
+        "client_tpot_estimate_ms_p50": percentile(tpot, 50),
+        "client_tpot_estimate_ms_p95": percentile(tpot, 95),
+        "inter_content_chunk_gap_ms_p95": percentile(gaps, 95),
         "requests": len(records), "successful_requests": len(good),
         "failed_requests": len(records) - len(good),
         "failure_rate": (len(records) - len(good)) / len(records) if records else None,

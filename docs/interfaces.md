@@ -1,6 +1,6 @@
 # TraceKV MVP v0.1 数据与模块接口
 
-状态：已实现的 MVP v0.1 接口说明。下一轮统一实验的数据交接见 [联调接口规范 v0.2](联调接口规范_v0.2.md)；公共字段的变更须同步修改 `contracts/schema.py`、样例和测试。
+状态：前半部分记录首周 MVP v0.1 历史协议；现行接入见下文 v1.0 和 [实验闭环](platform-workflow.md)。下一轮统一实验的数据交接见 [联调接口规范 v0.2](联调接口规范_v0.2.md)；公共字段的变更须同步修改 `contracts/schema.py`、样例和测试。
 
 ## 目标与边界
 
@@ -40,7 +40,7 @@ JSON 样例见 [`contracts/sample_snapshot.json`](../contracts/sample_snapshot.j
 
 ## C → A：PolicyRecommendation
 
-`policy.demo.recommend_policy(snapshot)` 返回 `run_id`、`policy`（`lru` / `os_aware`）、`bottleneck`（`memory_pressure` / `io_pressure` / `cache_miss` / `unknown`）、`reason`、`reason_codes` 和固定 `apply_mode=next_run`。当前阈值是**演示规则**：磁盘读取 P95 ≥ 10 ms、可用内存 < 1024 MB、前缀命中比 < 0.2，按此优先级评估。系统级高磁盘延迟只触发待验证的建议，不证明 KV 缓存造成 I/O 压力。真实策略执行和对照实验未实现。
+`policy.demo.recommend_policy(snapshot)` 返回 `run_id`、`policy`（`lru` / `os_aware`）、`bottleneck`（`memory_pressure` / `io_pressure` / `cache_miss` / `unknown`）、`reason`、`reason_codes` 和固定 `apply_mode=next_run`。当前阈值是**演示规则**：磁盘读取 P95 ≥ 10 ms、可用内存 < 1024 MB、前缀命中比 < 0.2，按此优先级评估。系统级高磁盘延迟只触发待验证的建议，不证明 KV 缓存造成 I/O 压力。这是旧演示接口；现行 GPU-only / CPU LRU 执行与自动对照使用下文平台接口。
 
 ## HTTP 接口与独立演示
 
@@ -55,7 +55,7 @@ python -m policy.demo < contracts/sample_snapshot.json
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8010
 ```
 
-启动后可用 `http://127.0.0.1:8010/docs` 测接口。下一阶段才增加创建实验与读取报告的 HTTP 路由；实验配置至少包含 `model_id`、`scenario`、`policy`、`concurrency`、`duration_s`、`seed`。
+启动后可用 `http://127.0.0.1:8010/docs` 测接口。现行版本已提供创建实验与读取报告的 HTTP 路由，字段见下文与实验闭环文档。首周曾计划的配置字段为 `model_id`、`scenario`、`policy`、`concurrency`、`duration_s`、`seed`。
 
 团队从 `main` 创建功能分支，通过 PR 合并。邓智文负责证明事件、采集窗口与丢失率；侯振宇负责策略正确性和固定访问序列测试；队长负责统一 `run_id`、同负载对照和报告。首周联合验收是同一份模拟快照经 HTTP 获得建议，并单独证明至少一项真实 Linux 采样。
 
@@ -95,7 +95,7 @@ elapsed_ns 的边界由生产者记录，本接口不把它解释成纯 GPU DMA 
 
 | 方法与路径 | 输入 | 返回 |
 | --- | --- | --- |
-| GET /api/v1/integrations | 无 | 接收端就绪、本机 bpftrace 是否存在、automatic_start=false |
+| GET /api/v1/integrations | 无 | 接收端就绪、本机工具与权限、can_attempt，以及 automatic_start=when_requested_and_capable |
 | POST /api/v1/runs/{run_id}/telemetry/ebpf | EbpfBatch | batch_id、received_at_utc、event_count、duplicate |
 | GET /api/v1/runs/{run_id}/telemetry/{source}/batches/{batch_id} | source=ebpf/cache | 原始声明、接收时间与校验摘要 |
 | POST /api/v1/runs/{run_id}/analyze | 无 | 离线重算结果，仅允许任务已结束 |
@@ -128,3 +128,7 @@ dropped_events=null 表示未知；0 必须有核对证据。这个数描述采�
 - 样例包含 synthetic=true；不要把样例改名后当成实测证据。
 
 在线交接入口：/api/v1/interfaces/guide 提供本文；/api/v1/interfaces/examples/ebpf、cache、strategy-request、strategy-response 提供对应 JSON 样例，均无需外部 CDN。
+
+## 实验闭环更新
+
+共享实验上下文、采集档位、SLO、时间线、多轮对照与建议追溯见 [实验平台闭环](platform-workflow.md)。
