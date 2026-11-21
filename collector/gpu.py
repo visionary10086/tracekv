@@ -61,6 +61,7 @@ class _NvmlDriver:
 
     _instance: _NvmlDriver | None = None
     _init_lock = threading.Lock()
+    _atexit_registered = False
 
     def __init__(self) -> None:
         self.lib: ctypes.CDLL | None = None
@@ -83,7 +84,27 @@ class _NvmlDriver:
         with cls._init_lock:
             if cls._instance is None:
                 cls._instance = cls()
+                if not cls._atexit_registered:
+                    import atexit
+                    atexit.register(cls.shutdown_singleton)
+                    cls._atexit_registered = True
             return cls._instance
+
+    @classmethod
+    def shutdown_singleton(cls) -> None:
+        """Safely shut down the NVML driver handle on process exit."""
+        with cls._init_lock:
+            if cls._instance is not None and cls._instance.initialized and cls._instance.lib is not None:
+                try:
+                    cls._instance.lib.nvmlShutdown()
+                except Exception:
+                    pass
+                cls._instance.initialized = False
+                cls._instance = None
+
+    def shutdown(self) -> None:
+        """Instance shutdown hook."""
+        self.shutdown_singleton()
 
     def query_device(self, gpu_index: int = 0) -> dict[str, Any] | None:
         """Query GPU metrics directly via NVML without spawning a subprocess."""

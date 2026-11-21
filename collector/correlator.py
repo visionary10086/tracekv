@@ -98,6 +98,9 @@ def correlate_experiment_data(
             summary = json.load(f)
             wall_anchor_ns = summary.get("start_wall_ns")
             mono_anchor_ns = summary.get("start_monotonic_ns")
+            if wall_anchor_ns is None and "kernel_clock_anchor" in summary:
+                wall_anchor_ns = summary["kernel_clock_anchor"].get("wall_ns")
+                mono_anchor_ns = summary["kernel_clock_anchor"].get("monotonic_ns")
 
     has_calibrated_anchor = wall_anchor_ns is not None and mono_anchor_ns is not None
 
@@ -309,11 +312,17 @@ def generate_aligned_snapshots(
             summary = json.load(f)
             wall_anchor_ns = summary.get("start_wall_ns")
             mono_anchor_ns = summary.get("start_monotonic_ns")
+            if wall_anchor_ns is None and "kernel_clock_anchor" in summary:
+                wall_anchor_ns = summary["kernel_clock_anchor"].get("wall_ns")
+                mono_anchor_ns = summary["kernel_clock_anchor"].get("monotonic_ns")
 
     has_anchor = wall_anchor_ns is not None and mono_anchor_ns is not None
 
-    # 2. Ingest scheduler events
-    sched_events: list[tuple[float, float, bool]] = []  # (epoch_sec, latency_us, is_target)
+    # 2. Ingest scheduler and kernel memory stall events
+    sched_events: list[tuple[float, float, bool]] = []   # (epoch_sec, latency_us, is_target)
+    runwait_events: list[tuple[float, float, bool]] = [] # (epoch_sec, wait_us, is_target)
+    oncpu_events: list[tuple[float, float, bool]] = []   # (epoch_sec, dur_us, is_target)
+    reclaim_events: list[tuple[float, float, bool]] = [] # (epoch_sec, stall_ms, is_target)
     sched_source = "unavailable"
     has_target_events = summary.get("scope") in ("target_process", "target_threads", "comm_match")
     if sched_events_path and Path(sched_events_path).exists():
@@ -328,13 +337,22 @@ def generate_aligned_snapshots(
                     try:
                         record = json.loads(line)
                         mono_ns = record.get("timestamp_ns")
-                        lat_ns = record.get("value")
+                        val_ns = record.get("value")
+                        metric = record.get("metric", "wakeup_to_run_latency")
                         is_tgt = bool(record.get("is_target", False))
                         if "is_target" in record:
                             has_target_events = True
-                        if _finite(mono_ns) and mono_ns >= 0 and _finite(lat_ns) and lat_ns >= 0:
+                        if _finite(mono_ns) and mono_ns >= 0 and _finite(val_ns) and val_ns >= 0:
                             wall_ns = wall_anchor_ns + (mono_ns - mono_anchor_ns)
-                            sched_events.append((wall_ns / 1e9, lat_ns / 1000.0, is_tgt))
+                            epoch_sec = wall_ns / 1e9
+                            if metric == "runnable_wait":
+                                runwait_events.append((epoch_sec, val_ns / 1000.0, is_tgt))
+                            elif metric == "on_cpu":
+                                oncpu_events.append((epoch_sec, val_ns / 1000.0, is_tgt))
+                            elif metric == "direct_reclaim":
+                                reclaim_events.append((epoch_sec, val_ns / 1e6, is_tgt))
+                            else:
+                                sched_events.append((epoch_sec, val_ns / 1000.0, is_tgt))
                     except Exception:
                         continue
             sched_source = "ebpf_sched"
@@ -388,6 +406,12 @@ def generate_aligned_snapshots(
     all_ts: list[float] = []
     if sched_events:
         all_ts.extend([t for t, *_ in sched_events])
+    if runwait_events:
+        all_ts.extend([t for t, *_ in runwait_events])
+    if oncpu_events:
+        all_ts.extend([t for t, *_ in oncpu_events])
+    if reclaim_events:
+        all_ts.extend([t for t, *_ in reclaim_events])
     if gpu_samples:
         all_ts.extend([t for t, _ in gpu_samples])
     if sys_samples:
@@ -486,11 +510,32 @@ def generate_aligned_snapshots(
             for rec in w_kvs
         ]
 
-        # 4. Sched section (windowed - zero copying from global summary!)
+        # 4. Sched & stall sections (windowed)
         w_sched = [lat for t, lat, _ in sched_events if w_start <= t < w_end]
         w_sched.sort()
         w_target = [lat for t, lat, is_tgt in sched_events if w_start <= t < w_end and is_tgt]
         w_target.sort()
+
+        # Runnable wait (preemption stall)
+        w_rw = [lat for t, lat, _ in runwait_events if w_start <= t < w_end]
+        w_rw.sort()
+        w_rw_tgt = [lat for t, lat, is_tgt in runwait_events if w_start <= t < w_end and is_tgt]
+        w_rw_tgt.sort()
+
+        # On-CPU execution slice
+        w_oncpu = [lat for t, lat, _ in oncpu_events if w_start <= t < w_end]
+        w_oncpu.sort()
+        w_oncpu_tgt = [lat for t, lat, is_tgt in oncpu_events if w_start <= t < w_end and is_tgt]
+        w_oncpu_tgt.sort()
+
+        # Direct memory reclaim stall (ms)
+        w_reclaim = [ms for t, ms, _ in reclaim_events if w_start <= t < w_end]
+        reclaim_stall_ms = round(sum(w_reclaim), 2) if w_reclaim else None
+        if reclaim_stall_ms is not None:
+            system_section["direct_reclaim_stall_ms"] = reclaim_stall_ms
+
+        rw_tgt_p99 = _percentile(w_rw_tgt, 99) if w_rw_tgt else (_percentile(w_rw, 99) if w_rw else None)
+        oncpu_tgt_p99 = _percentile(w_oncpu_tgt, 99) if w_oncpu_tgt else (_percentile(w_oncpu, 99) if w_oncpu else None)
 
         if has_target_events:
             sched_section: dict[str, Any] = {
@@ -499,11 +544,15 @@ def generate_aligned_snapshots(
                 "p50_us": _percentile(w_target, 50),
                 "p95_us": _percentile(w_target, 95),
                 "p99_us": _percentile(w_target, 99),
+                "runwait_p99_us": rw_tgt_p99,
+                "on_cpu_p99_us": oncpu_tgt_p99,
                 "system_baseline": {
                     "event_count": len(w_sched),
                     "p50_us": _percentile(w_sched, 50),
                     "p95_us": _percentile(w_sched, 95),
                     "p99_us": _percentile(w_sched, 99),
+                    "runwait_p99_us": _percentile(w_rw, 99) if w_rw else None,
+                    "on_cpu_p99_us": _percentile(w_oncpu, 99) if w_oncpu else None,
                 },
             }
         else:
@@ -513,6 +562,8 @@ def generate_aligned_snapshots(
                 "p50_us": _percentile(w_sched, 50),
                 "p95_us": _percentile(w_sched, 95),
                 "p99_us": _percentile(w_sched, 99),
+                "runwait_p99_us": rw_tgt_p99,
+                "on_cpu_p99_us": oncpu_tgt_p99,
             }
 
         # Sources dictionary
@@ -707,14 +758,31 @@ def diagnose_system_bottlenecks(snapshots, lagged_corr=None, kv_pcie=None):
     def high(value, threshold):
         return value is not None and value >= threshold
     sched = values("sched", "p99_us")
+    runwait = values("sched", "runwait_p99_us")
+    reclaim = values("system", "direct_reclaim_stall_ms")
     cpu, mem, io = (psi_values("psi_" + name + "_some_avg10") for name in ("cpu", "mem", "io"))
     gpu = values("gpu", "utilization_pct")
-    max_sched, max_cpu, max_mem, max_io = (max(v, default=None) for v in (sched, cpu, mem, io))
+    max_sched, max_rw, max_rec, max_cpu, max_mem, max_io = (
+        max(v, default=None) for v in (sched, runwait, reclaim, cpu, mem, io)
+    )
     gpu_mean = round(sum(gpu) / len(gpu), 1) if gpu else None
     pcie = (kv_pcie or {}).get("pcie_physical", {}).get("bus_saturation_pct")
-    coverage = {"sched": len(sched), "psi_cpu": len(cpu), "psi_memory": len(mem),
-                "psi_io": len(io), "gpu": len(gpu)}
-    if high(max_sched, 5000) or high(max_cpu, 25):
+    coverage = {"sched": len(sched), "runwait": len(runwait), "direct_reclaim": len(reclaim),
+                "psi_cpu": len(cpu), "psi_memory": len(mem), "psi_io": len(io), "gpu": len(gpu)}
+
+    if high(max_rec, 10.0):
+        category = "DIRECT_RECLAIM_MEMORY_STALL"
+        severity = "CRITICAL"
+        message = (f"Linux kernel direct memory reclaim stall detected (peak {max_rec} ms). "
+                   "Allocating threads were synchronously blocked on page scanning/compaction.")
+        recommendations = ["Inspect memory PSI and swap activity; increase free memory headroom or adjust KV cache allocation thresholds."]
+    elif high(max_rw, 8000) and (max_sched is None or max_rw > max_sched * 1.5):
+        category = "CPU_PREEMPTION_CONTENTION"
+        severity = "CRITICAL" if high(max_rw, 15000) else "WARNING"
+        message = (f"Excessive CPU time-slice preemption detected (runwait P99 {max_rw} us). "
+                   "Runnable threads are frequently preempted and stalled in the runqueue.")
+        recommendations = ["Check task priorities (nice values), CPU affinity (taskset), and reduce competing background threads."]
+    elif high(max_sched, 5000) or high(max_cpu, 25):
         category = "HOST_SCHEDULING_CONTENTION"
         severity = "CRITICAL" if high(max_sched, 10000) else "WARNING"
         message = "Scheduling latency or CPU PSI crossed an exploratory threshold. Inspect the recorded scope before attributing this to inference workers."

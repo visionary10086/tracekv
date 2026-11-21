@@ -1,0 +1,129 @@
+#!/usr/bin/env bpftrace
+/*
+ * mem_reclaim.bt — Direct Memory Reclaim & Compaction Stall Tracer (E5)
+ *
+ * Measures the time a thread is stalled inside the kernel's direct memory
+ * reclaim path.  Direct reclaim occurs when the allocator cannot satisfy a
+ * request from free lists and must synchronously reclaim pages — directly
+ * blocking the allocating thread and adding latency to any operation that
+ * triggers allocation (e.g. KV cache offload buffer allocation, model weight
+ * loading, Python object allocation under memory pressure).
+ *
+ * Output format (pipe-delimited):
+ *   CLOCK|wall_ns=<realtime_ns>|mono_ns=<monotonic_ns>
+ *   HEADER|end_ns|tid|duration_ns|nr_reclaimed
+ *   RECLAIM|<end_ns>|<tid>|<duration_ns>|<nr_reclaimed>
+ *
+ * Diagnostic counters on exit:
+ *   STAT|matched|<n>          — completed begin/end pairs recorded
+ *   STAT|unmatched_end|<n>    — end without recorded begin (tracer started mid-reclaim)
+ *   STAT|exit_cleanup|<n>     — map entries cleared on task exit
+ *
+ * Usage:
+ *   # Requires root or CAP_BPF.  First verify tracepoint availability:
+ *   #   sudo bpftrace -l 'tracepoint:vmscan:*'
+ *
+ *   # Trace all threads:
+ *   sudo bpftrace collector/ebpf/mem_reclaim.bt
+ *
+ *   # Trace a specific TID:
+ *   sudo bpftrace -D TARGET_TID=<tid> collector/ebpf/mem_reclaim.bt
+ *
+ * Designed for bpftrace >= 0.20, kernel >= 5.4.
+ * Verified on WSL2 kernel 6.18.54.1-microsoft-standard-WSL2.
+ *
+ * Fallback: if vmscan tracepoints are disabled (some WSL configs),
+ * use kprobe:try_to_free_pages / kretprobe:try_to_free_pages instead.
+ *
+ * Author: 邓智文 (DAGER)
+ * Project: TraceKV — collector/ebpf/mem_reclaim.bt
+ */
+
+#ifndef TARGET_TGID
+#define TARGET_TGID 0
+#endif
+
+#ifndef TARGET_TID
+#define TARGET_TID 0
+#endif
+
+BEGIN
+{
+    /* E0: emit clock anchor for monotonic→wall conversion in userspace */
+    printf("CLOCK|wall_ns=%llu|mono_ns=%llu\n",
+           (uint64)nsecs(realtime), (uint64)nsecs(monotonic));
+    printf("HEADER|end_ns|tid|duration_ns|nr_reclaimed\n");
+    @reclaim_matched = 0;
+    @unmatched_end = 0;
+    @exit_cleanup = 0;
+}
+
+/*
+ * mm_vmscan_direct_reclaim_begin
+ *
+ * Fired when a task enters the direct reclaim path.
+ * args: order (allocation order), gfp_flags
+ */
+tracepoint:vmscan:mm_vmscan_direct_reclaim_begin
+{
+    /* Cut off tracer self-interference */
+    if (comm == "bpftrace" || comm == "python3" || comm == "python") {
+        return;
+    }
+    if ((TARGET_TGID == 0 && TARGET_TID == 0) ||
+        (TARGET_TID != 0 && tid == TARGET_TID) ||
+        (TARGET_TGID != 0 && curtask->tgid == TARGET_TGID)) {
+        @reclaim_start[tid] = nsecs(monotonic);
+    }
+}
+
+/*
+ * mm_vmscan_direct_reclaim_end
+ *
+ * Fired when direct reclaim exits.
+ * args: nr_reclaimed (number of pages reclaimed)
+ */
+tracepoint:vmscan:mm_vmscan_direct_reclaim_end
+{
+    /* Cut off tracer self-interference */
+    if (comm == "bpftrace" || comm == "python3" || comm == "python") {
+        return;
+    }
+    if ((TARGET_TGID == 0 && TARGET_TID == 0) ||
+        (TARGET_TID != 0 && tid == TARGET_TID) ||
+        (TARGET_TGID != 0 && curtask->tgid == TARGET_TGID)) {
+        $start = @reclaim_start[tid];
+        if ($start != 0) {
+            $end_ts = nsecs(monotonic);
+            $dur = $end_ts - $start;
+            printf("RECLAIM|%llu|%d|%llu|%d\n",
+                   $end_ts, tid, $dur, args.nr_reclaimed);
+            delete(@reclaim_start[tid]);
+            @reclaim_matched++;
+        } else {
+            @unmatched_end++;
+        }
+    }
+}
+
+/*
+ * sched_process_exit — clean up for exiting tasks.
+ */
+tracepoint:sched:sched_process_exit
+{
+    if (@reclaim_start[args.pid] != 0) {
+        delete(@reclaim_start[args.pid]);
+        @exit_cleanup++;
+    }
+}
+
+END
+{
+    printf("STAT|matched|%llu\n", @reclaim_matched);
+    printf("STAT|unmatched_end|%llu\n", @unmatched_end);
+    printf("STAT|exit_cleanup|%llu\n", @exit_cleanup);
+    clear(@reclaim_start);
+    clear(@reclaim_matched);
+    clear(@unmatched_end);
+    clear(@exit_cleanup);
+}

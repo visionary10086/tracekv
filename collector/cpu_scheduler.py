@@ -9,6 +9,14 @@ Requires ``bpftrace`` and sufficient privileges (typically root) to attach
 to kernel tracepoints.  When privileges are insufficient the collector
 exits cleanly with an informative message rather than crashing.
 
+E0 additions (2026-11-21):
+  - ClockAnchor: kernel realtime+monotonic clock pair from bpftrace CLOCK| line
+  - parse_clock(): parse CLOCK|wall_ns=...|mono_ns=... emitted by BEGIN block
+  - to_wall_ns(): convert kernel monotonic timestamp → UTC wall nanoseconds
+  - RunwaitEvent / parse_runwait(): Preempt-to-Run (RUNWAIT) latency path (E1)
+  - check_ebpf_environment(): bpftrace version, tracefs mount, privilege check
+  - map_overflow_count in CollectorStats
+
 Author: 邓智文 (DAGER)
 """
 
@@ -33,10 +41,16 @@ from typing import IO, TextIO
 # ---------------------------------------------------------------------------
 
 _SCRIPT_PATH = Path(__file__).resolve().parent / "ebpf" / "sched_latency.bt"
+_ENV_CHECK_SCRIPT = Path(__file__).resolve().parent / "ebpf" / "env_check.bt"
 
 _EVENT_PREFIX = "SCHED|"
+_RUNWAIT_PREFIX = "RUNWAIT|"
+_ONCPU_PREFIX = "ONCPU|"
+_CLOCK_PREFIX = "CLOCK|"
 _STAT_PREFIX = "STAT|"
 _HEADER_PREFIX = "HEADER|"
+
+_MIN_BPFTRACE_VERSION = (0, 20, 0)
 
 DEFAULT_MAX_MAP_KEYS = 65536
 DEFAULT_PERF_RB_PAGES = 256
@@ -60,6 +74,35 @@ class SchedEvent:
 
 
 @dataclass
+class RunwaitEvent:
+    """One Preempt-to-Run latency observation (E1).
+
+    Captured when a task was preempted (prev_state==0 in sched_switch) and
+    subsequently rescheduled.  Covers the runnable-queue wait time that
+    wakeup_to_run_latency does NOT measure.
+    """
+    switch_ns: int     # monotonic ns when task re-enters CPU
+    preempt_ns: int    # monotonic ns when task was preempted off CPU
+    tid: int
+    cpu: int
+    wait_ns: int       # = switch_ns - preempt_ns
+    comm: str
+
+
+@dataclass
+class ClockAnchor:
+    """Kernel-emitted clock pair for monotonic→wall conversion (E0).
+
+    Extracted from the ``CLOCK|wall_ns=...|mono_ns=...`` line that
+    sched_latency.bt emits in its BEGIN block.  wall_ns is CLOCK_REALTIME
+    (nanoseconds since epoch); mono_ns is CLOCK_MONOTONIC at the same
+    instant, as seen by the kernel's bpftrace nsecs(realtime/monotonic).
+    """
+    wall_ns: int        # CLOCK_REALTIME  (kernel, nanoseconds)
+    monotonic_ns: int   # CLOCK_MONOTONIC (kernel, nanoseconds)
+
+
+@dataclass
 class TimeAnchor:
     """Pair of wall-clock and monotonic readings for time calibration."""
     wall_ns: int          # time.time_ns()
@@ -76,6 +119,11 @@ class CollectorStats:
     duplicate_wakeup_count: int = 0
     exit_cleanup_count: int = 0
     parser_error_count: int = 0
+    map_overflow_count: int = 0          # E0: BPF map capacity overflow events
+    runwait_event_count: int = 0         # E1: preempt-to-run events parsed
+    kernel_runwait_matched: int | None = None  # E1: STAT|runwait_matched from kernel
+    oncpu_event_count: int = 0           # E2: on-cpu execution slices parsed
+    kernel_oncpu_matched: int | None = None    # E2: STAT|oncpu_matched from kernel
     min_ns: int | None = None
     max_ns: int | None = None
     sum_ns: int = 0
@@ -102,6 +150,8 @@ class CollectorResult:
     target_pids: list[int] | None = None
     target_comm: str | None = None
     target_stats: CollectorStats | None = None
+    kernel_clock_anchor: ClockAnchor | None = None  # E0: from CLOCK| line
+    target_tids: list[int] | None = None            # Dynamically discovered or observed TIDs
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +210,222 @@ def parse_stat(line: str) -> tuple[str, int] | None:
         return None
 
 
+def parse_clock(line: str) -> ClockAnchor | None:
+    """Parse a ``CLOCK|wall_ns=<n>|mono_ns=<n>`` line emitted by bpftrace BEGIN.
+
+    Returns a :class:`ClockAnchor` on success, ``None`` on malformed input.
+
+    Example input::
+
+        CLOCK|wall_ns=1700000000000000000|mono_ns=12345678901234
+
+    The two timestamps are captured by the kernel at the same instant,
+    providing an anchor for converting subsequent CLOCK_MONOTONIC event
+    timestamps to UTC wall-clock nanoseconds via :func:`to_wall_ns`.
+    """
+    if not line.startswith("CLOCK|"):
+        return None
+    parts = line.split("|")
+    if len(parts) != 3:
+        return None
+    try:
+        wall_part = parts[1]   # "wall_ns=<n>"
+        mono_part = parts[2]   # "mono_ns=<n>"
+        if not wall_part.startswith("wall_ns=") or not mono_part.startswith("mono_ns="):
+            return None
+        wall_ns = int(wall_part[len("wall_ns="):])
+        mono_ns = int(mono_part[len("mono_ns="):])
+    except (ValueError, IndexError):
+        return None
+    if wall_ns <= 0 or mono_ns <= 0:
+        return None
+    return ClockAnchor(wall_ns=wall_ns, monotonic_ns=mono_ns)
+
+
+def to_wall_ns(mono_ns: int, anchor: ClockAnchor) -> int:
+    """Convert a kernel CLOCK_MONOTONIC timestamp to UTC wall-clock nanoseconds.
+
+    Uses the kernel-emitted :class:`ClockAnchor` (wall + monotonic captured
+    simultaneously) to shift the monotonic reading into absolute time::
+
+        wall_ns = anchor.wall_ns + (mono_ns - anchor.monotonic_ns)
+
+    This provides sub-microsecond accuracy for event timestamps when the
+    anchor is captured close to the start of collection.
+
+    Args:
+        mono_ns:  Kernel monotonic nanoseconds from a bpftrace event.
+        anchor:   :class:`ClockAnchor` from :func:`parse_clock`.
+
+    Returns:
+        UTC nanoseconds since the Unix epoch.
+    """
+    return anchor.wall_ns + (mono_ns - anchor.monotonic_ns)
+
+
+def parse_runwait(line: str) -> RunwaitEvent | None:
+    """Parse a ``RUNWAIT|…`` line into a :class:`RunwaitEvent` (E1).
+
+    Format::
+
+        RUNWAIT|<switch_ns>|<preempt_ns>|<tid>|<cpu>|<wait_ns>|<comm>
+
+    Returns ``None`` if the line is malformed or values are invalid.
+    """
+    parts = line.split("|")
+    if len(parts) != 7 or parts[0] != "RUNWAIT":
+        return None
+    try:
+        switch_ns = int(parts[1])
+        preempt_ns = int(parts[2])
+        tid = int(parts[3])
+        cpu_id = int(parts[4])
+        wait_ns = int(parts[5])
+        comm = parts[6].strip()
+    except (ValueError, IndexError):
+        return None
+    if wait_ns < 0 or tid < 0 or switch_ns < 0 or preempt_ns < 0 or cpu_id < 0:
+        return None
+    if not comm:
+        return None
+    return RunwaitEvent(
+        switch_ns=switch_ns,
+        preempt_ns=preempt_ns,
+        tid=tid,
+        cpu=cpu_id,
+        wait_ns=wait_ns,
+        comm=comm,
+    )
+
+
+def check_ebpf_environment(bpftrace_path: str | None = None) -> dict:
+    """Check whether the eBPF collection environment is functional (E0).
+
+    Performs three independent checks and returns a summary dict:
+
+    * ``bpftrace_ok``: bpftrace binary found and responds to ``--version``.
+    * ``bpftrace_version``: detected version tuple, e.g. ``(0, 20, 4)``.
+    * ``version_ok``: ``True`` if version >= ``(0, 20, 0)``.
+    * ``tracefs_ok``: ``/sys/kernel/debug/tracing`` or
+      ``/sys/kernel/tracing`` is readable (tracefs mounted).
+    * ``privilege_ok``: running as root (``euid == 0``) or CAP_BPF present.
+    * ``liveness_ok``: env_check.bt executed successfully (bpftrace can
+      attach to kernel).  Only attempted when bpftrace_ok is True.
+    * ``details``: human-readable summary string.
+    * ``errors``: list of error strings for failed checks.
+
+    This function never raises; failures are captured in the return value.
+    """
+    result: dict = {
+        "bpftrace_ok": False,
+        "bpftrace_version": None,
+        "version_ok": False,
+        "tracefs_ok": False,
+        "privilege_ok": False,
+        "liveness_ok": False,
+        "details": "",
+        "errors": [],
+    }
+
+    # --- bpftrace binary check ---
+    bt = bpftrace_path or _find_bpftrace()
+    if bt is None:
+        result["errors"].append("bpftrace not found in PATH")
+    else:
+        try:
+            out = subprocess.run(
+                [bt, "--version"], capture_output=True, text=True, timeout=5
+            )
+            version_str = (out.stdout + out.stderr).strip()
+            # Parse "bpftrace v0.20.4" or "bpftrace 0.20.4"
+            import re as _re
+            m = _re.search(r"(\d+)\.(\d+)\.(\d+)", version_str)
+            if m:
+                ver = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                result["bpftrace_ok"] = True
+                result["bpftrace_version"] = ver
+                result["version_ok"] = ver >= _MIN_BPFTRACE_VERSION
+                if not result["version_ok"]:
+                    result["errors"].append(
+                        f"bpftrace {ver} < required {_MIN_BPFTRACE_VERSION}"
+                    )
+            else:
+                result["errors"].append(f"Cannot parse bpftrace version: {version_str!r}")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            result["errors"].append(f"bpftrace --version failed: {exc}")
+
+    # --- tracefs mount check ---
+    for tracefs_path in ("/sys/kernel/debug/tracing", "/sys/kernel/tracing"):
+        try:
+            p = Path(tracefs_path)
+            if p.is_dir() and os.access(tracefs_path, os.R_OK):
+                result["tracefs_ok"] = True
+                break
+        except (OSError, PermissionError):
+            continue
+    if not result["tracefs_ok"]:
+        result["errors"].append(
+            "tracefs not readable at /sys/kernel/debug/tracing or /sys/kernel/tracing"
+        )
+
+    # --- privilege check ---
+    if os.geteuid() == 0:
+        result["privilege_ok"] = True
+    else:
+        # Check for CAP_BPF via /proc/self/status CapEff
+        try:
+            status = Path("/proc/self/status").read_text(encoding="utf-8")
+            for line in status.splitlines():
+                if line.startswith("CapEff:"):
+                    cap_eff = int(line.split(":")[1].strip(), 16)
+                    # CAP_BPF = bit 39 (kernel 5.8+)
+                    if cap_eff & (1 << 39):
+                        result["privilege_ok"] = True
+                    break
+        except (OSError, ValueError):
+            pass
+    if not result["privilege_ok"]:
+        result["errors"].append("Not root and CAP_BPF not detected; bpftrace needs elevated privileges")
+
+    # --- liveness check (env_check.bt) ---
+    if result["bpftrace_ok"] and result["version_ok"]:
+        env_bt = _ENV_CHECK_SCRIPT
+        if env_bt.exists():
+            try:
+                out = subprocess.run(
+                    [bt, str(env_bt)],
+                    capture_output=True, text=True, timeout=10
+                )
+                if "OK|bpftrace_alive" in out.stdout:
+                    result["liveness_ok"] = True
+                else:
+                    result["errors"].append(
+                        f"env_check.bt did not emit OK|bpftrace_alive; "
+                        f"stdout={out.stdout!r} stderr={out.stderr!r}"
+                    )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                result["errors"].append(f"env_check.bt execution failed: {exc}")
+        else:
+            result["errors"].append(f"env_check.bt not found at {env_bt}")
+
+    all_ok = (
+        result["bpftrace_ok"]
+        and result["version_ok"]
+        and result["tracefs_ok"]
+        and result["privilege_ok"]
+        and result["liveness_ok"]
+    )
+    result["details"] = (
+        f"bpftrace={'ok' if result['bpftrace_ok'] else 'missing'} "
+        f"version={result['bpftrace_version']} "
+        f"tracefs={'ok' if result['tracefs_ok'] else 'missing'} "
+        f"privilege={'ok' if result['privilege_ok'] else 'missing'} "
+        f"liveness={'ok' if result['liveness_ok'] else 'skipped/fail'} "
+        f"→ {'READY' if all_ok else 'NOT READY'}"
+    )
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Percentile computation
 # ---------------------------------------------------------------------------
@@ -203,6 +469,128 @@ def compute_stats(latencies_ns: list[int]) -> CollectorStats:
 
 
 # ---------------------------------------------------------------------------
+# Dynamic thread discovery and TGID resolution
+# ---------------------------------------------------------------------------
+
+def discover_process_tids(pid: int) -> set[int]:
+    """Scan /proc/<pid>/task to discover all active thread IDs (TIDs) for a process.
+
+    Returns a set containing at least ``{pid}`` (the main thread).  If /proc
+    is unavailable or permission is denied, falls back gracefully to ``{pid}``.
+    """
+    tids = {pid}
+    try:
+        task_dir = Path(f"/proc/{pid}/task")
+        if task_dir.is_dir():
+            for entry in task_dir.iterdir():
+                if entry.name.isdigit():
+                    tids.add(int(entry.name))
+    except (OSError, PermissionError):
+        pass
+    return tids
+
+
+class ThreadTracker:
+    """Tracks thread IDs (TIDs) for target processes and resolves their owning TGID.
+
+    In Linux, a multi-threaded process (such as a vLLM engine, PyTorch worker pool,
+    or OpenMP runtime) shares a single Process Group ID (TGID = pid), while each
+    thread has a unique Thread ID (TID).  The kernel scheduler tracepoints report
+    individual TIDs.
+
+    This tracker:
+    1. Scans /proc/<pid>/task to automatically expand a target process PID into
+       all of its constituent worker thread TIDs.
+    2. Maps each discovered TID back to its owning process TGID, satisfying the
+       platform contract: 'pid is real TGID, unknown filled as null, cannot be
+       substituted by tid'.
+    3. Supports dynamic TID resolution on cache miss via /proc/<tid>/status.
+    """
+
+    def __init__(
+        self,
+        target_pids: list[int] | set[int] | None = None,
+        target_comm: str | None = None,
+        auto_expand: bool = True,
+    ):
+        self.target_pids: list[int] | None = list(target_pids) if target_pids is not None else None
+        self.target_comm: str | None = target_comm
+        self.auto_expand: bool = auto_expand
+        self._target_tids: set[int] = set(self.target_pids) if self.target_pids else set()
+        self._tid_to_tgid: dict[int, int] = {}
+        if self.target_pids and self.auto_expand:
+            self.refresh()
+
+    def refresh(self) -> None:
+        """Scan /proc/<pid>/task for all target PIDs to update active TIDs and TGID map."""
+        if not self.target_pids:
+            return
+        for pid in self.target_pids:
+            try:
+                task_dir = Path(f"/proc/{pid}/task")
+                if task_dir.is_dir():
+                    for entry in task_dir.iterdir():
+                        if entry.name.isdigit():
+                            tid = int(entry.name)
+                            self._target_tids.add(tid)
+                            self._tid_to_tgid[tid] = pid
+            except (OSError, PermissionError):
+                pass
+
+    def matches(self, tid: int, comm: str | None = None) -> bool:
+        """Check whether (tid, comm) matches the tracked target process/comm.
+
+        When both target_pids and target_comm are specified, both must match (AND semantics).
+        """
+        if self.target_pids is None and self.target_comm is None:
+            return False
+
+        pid_match = True
+        if self.target_pids is not None:
+            if tid in self._target_tids:
+                pid_match = True
+            elif self.auto_expand:
+                tgid = self.resolve_tgid_from_proc(tid)
+                if tgid is not None and tgid in self.target_pids:
+                    self._target_tids.add(tid)
+                    self._tid_to_tgid[tid] = tgid
+                    pid_match = True
+                else:
+                    pid_match = False
+            else:
+                pid_match = False
+
+        comm_match = True
+        if self.target_comm is not None:
+            comm_match = (comm == self.target_comm)
+
+        return pid_match and comm_match
+
+    def resolve_tgid(self, tid: int) -> int | None:
+        """Return the owning TGID for this TID, or None if unknown."""
+        return self._tid_to_tgid.get(tid)
+
+    @staticmethod
+    def resolve_tgid_from_proc(tid: int) -> int | None:
+        """Inspect /proc/<tid>/status to read the Tgid field."""
+        try:
+            status_path = Path(f"/proc/{tid}/status")
+            if not status_path.exists():
+                return None
+            for line in status_path.read_text(encoding="utf-8").splitlines():
+                if line.startswith("Tgid:"):
+                    return int(line.split(":")[1].strip())
+        except (OSError, ValueError, IndexError):
+            pass
+        return None
+
+    @property
+    def all_target_tids(self) -> list[int]:
+        """Return a sorted list of all known TIDs belonging to the target."""
+        return sorted(self._target_tids)
+
+
+# ---------------------------------------------------------------------------
 # JSONL formatting
 # ---------------------------------------------------------------------------
 
@@ -212,7 +600,9 @@ def _target_scope(target_pids, target_comm):
     return "comm_match" if target_comm is not None else "system"
 
 
-def _matches_target(event, target_pids, target_comm):
+def _matches_target(event, target_pids, target_comm, tracker: ThreadTracker | None = None):
+    if tracker is not None:
+        return tracker.matches(event.tid, event.comm)
     return (target_pids is not None or target_comm is not None) and (
         target_pids is None or event.tid in target_pids
     ) and (target_comm is None or event.comm == target_comm)
@@ -223,13 +613,17 @@ def event_to_jsonl(
     run_id: str,
     target_pids: list[int] | None = None,
     target_comm: str | None = None,
+    tracker: ThreadTracker | None = None,
 ) -> str:
     """Serialize one event to a JSON line (no trailing newline)."""
     # sched_switch supplies a TID and comm, not the process TGID.
     pid_val = None
-    is_target = _matches_target(event, target_pids, target_comm) if (
-        target_pids is not None or target_comm is not None
-    ) else None
+    if tracker is not None:
+        is_target = tracker.matches(event.tid, event.comm)
+    else:
+        is_target = _matches_target(event, target_pids, target_comm) if (
+            target_pids is not None or target_comm is not None
+        ) else None
 
     payload = {
         "schema_version": 1,
@@ -294,6 +688,8 @@ def stats_to_dict(result: CollectorResult) -> dict:
     }
     if result.target_pids is not None:
         d["target_pids"] = result.target_pids
+    if result.target_tids is not None:
+        d["target_tids"] = result.target_tids
     if result.target_comm is not None:
         d["target_comm"] = result.target_comm
     if result.scope != "system" and result.target_stats is not None:
@@ -355,6 +751,7 @@ def process_stream(
         target_pids=target_pids,
         target_comm=target_comm,
     )
+    tracker = ThreadTracker(target_pids=target_pids, target_comm=target_comm)
     sample_reservoir: list[int] = []
     target_reservoir: list[int] = []
     target_stats = CollectorStats() if scope != "system" else None
@@ -363,7 +760,6 @@ def process_stream(
     rng = random.Random(random_seed) if random_seed is not None else random.Random()
     seen_tids: set[int] = set()
     comm_counts: dict[str, int] = {}
-    target_pids_set = set(target_pids) if target_pids is not None else None
 
     for raw_line in stream:
         line = raw_line.rstrip("\n").rstrip("\r")
@@ -384,6 +780,89 @@ def process_stream(
                     result.stats.exit_cleanup_count = value
                 elif name == "matched":
                     result.stats.kernel_matched_count = value
+                elif name == "runwait_matched":          # E1
+                    result.stats.kernel_runwait_matched = value
+                elif name == "oncpu_matched":            # E2
+                    result.stats.kernel_oncpu_matched = value
+                elif name == "map_overflow":             # E0
+                    result.stats.map_overflow_count = value
+            continue
+
+        # E0: kernel clock anchor line
+        if line.startswith(_CLOCK_PREFIX):
+            anchor_parsed = parse_clock(line)
+            if anchor_parsed is not None:
+                result.kernel_clock_anchor = anchor_parsed
+            continue
+
+        # E1: Preempt-to-Run runwait event
+        if line.startswith(_RUNWAIT_PREFIX):
+            rw = parse_runwait(line)
+            if rw is None:
+                result.stats.parser_error_count += 1
+                continue
+            result.stats.runwait_event_count += 1
+            # Write RUNWAIT events to JSONL output with metric tag and resolved TGID
+            if output is not None:
+                rw_wall_ns = (
+                    to_wall_ns(rw.switch_ns, result.kernel_clock_anchor)
+                    if hasattr(result, "kernel_clock_anchor") and result.kernel_clock_anchor
+                    else None
+                )
+                rw_is_target = tracker.matches(rw.tid, rw.comm)
+                rw_tgid = tracker.resolve_tgid(rw.tid) if rw_is_target else None
+                rw_record = {
+                    "metric": "runnable_wait",
+                    "run_id": run_id,
+                    "timestamp_ns": rw.switch_ns,
+                    "timestamp_wall_ns": rw_wall_ns,
+                    "value": rw.wait_ns,
+                    "pid": rw_tgid,
+                    "tid": rw.tid,
+                    "cpu": rw.cpu,
+                    "comm": rw.comm,
+                    "is_target": rw_is_target,
+                }
+                output.write(json.dumps(rw_record) + "\n")
+            continue
+
+        # E2: Unified ONCPU execution slice event
+        if line.startswith(_ONCPU_PREFIX):
+            parts = line.split("|")
+            if len(parts) == 6:
+                try:
+                    oncpu_end_ns = int(parts[1])
+                    oncpu_tid = int(parts[2])
+                    oncpu_cpu = int(parts[3])
+                    oncpu_dur_ns = int(parts[4])
+                    oncpu_comm = parts[5].strip()
+                    if oncpu_dur_ns >= 0 and oncpu_tid >= 0:
+                        result.stats.oncpu_event_count += 1
+                        if output is not None:
+                            oncpu_wall = (
+                                to_wall_ns(oncpu_end_ns, result.kernel_clock_anchor)
+                                if hasattr(result, "kernel_clock_anchor") and result.kernel_clock_anchor
+                                else None
+                            )
+                            oncpu_is_tgt = tracker.matches(oncpu_tid, oncpu_comm)
+                            oncpu_tgid = tracker.resolve_tgid(oncpu_tid) if oncpu_is_tgt else None
+                            oncpu_record = {
+                                "metric": "on_cpu",
+                                "run_id": run_id,
+                                "timestamp_ns": oncpu_end_ns,
+                                "timestamp_wall_ns": oncpu_wall,
+                                "value": oncpu_dur_ns,
+                                "pid": oncpu_tgid,
+                                "tid": oncpu_tid,
+                                "cpu": oncpu_cpu,
+                                "comm": oncpu_comm,
+                                "is_target": oncpu_is_tgt,
+                            }
+                            output.write(json.dumps(oncpu_record) + "\n")
+                        continue
+                except (ValueError, IndexError):
+                    pass
+            result.stats.parser_error_count += 1
             continue
 
         if line.startswith(_EVENT_PREFIX):
@@ -410,8 +889,8 @@ def process_stream(
                 if j < max_samples:
                     sample_reservoir[j] = event.latency_ns
 
-            # Target process filtering
-            is_target = _matches_target(event, target_pids_set, target_comm)
+            # Target process filtering with dynamic thread tree awareness
+            is_target = tracker.matches(event.tid, event.comm)
 
             if is_target and target_stats is not None:
                 target_stats.event_count += 1
@@ -436,6 +915,7 @@ def process_stream(
                         run_id,
                         target_pids=target_pids,
                         target_comm=target_comm,
+                        tracker=tracker,
                     ) + "\n"
                 )
             continue
@@ -474,6 +954,11 @@ def process_stream(
         result.stats.dropped_events_count = max(
             0, result.stats.kernel_matched_count - received_total
         )
+
+    # Reflect all dynamically discovered worker thread TIDs in result.target_tids
+    # while preserving original user configuration in result.target_pids
+    if tracker.target_pids is not None:
+        result.target_tids = tracker.all_target_tids
 
     result.end_anchor = TimeAnchor(
         wall_ns=time.time_ns(), monotonic_ns=time.monotonic_ns(),
@@ -603,7 +1088,10 @@ def run_collector(
         )
 
     script = str(script_path or _SCRIPT_PATH)
-    cmd = [bt, script]
+    cmd = [bt]
+    if target_pids and len(target_pids) == 1:
+        cmd.extend(["-D", f"TARGET_TGID={target_pids[0]}"])
+    cmd.append(script)
 
     env = os.environ.copy()
     env.setdefault("BPFTRACE_MAX_MAP_KEYS", str(max_map_keys))

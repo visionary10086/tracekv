@@ -1,0 +1,126 @@
+#!/usr/bin/env bpftrace
+/*
+ * cpu_runtime.bt — Thread Actual CPU Execution Time Tracer (E2)
+ *
+ * Measures the time a thread actually spends executing on a CPU core
+ * (from sched_switch "in" to sched_switch "out").  This is distinct from
+ * wakeup latency: it captures the real compute slice, not the queuing wait.
+ *
+ * Output format (pipe-delimited):
+ *   CLOCK|wall_ns=<realtime_ns>|mono_ns=<monotonic_ns>
+ *   HEADER|end_ns|tid|cpu|duration_ns|comm
+ *   ONCPU|<end_ns>|<tid>|<cpu>|<duration_ns>|<comm>
+ *
+ * Diagnostic counters on exit:
+ *   STAT|matched|<n>          — completed on-cpu slices recorded
+ *   STAT|unmatched_out|<n>    — switch-out without recorded switch-in (normal at start)
+ *   STAT|exit_cleanup|<n>     — map entries cleared on task exit
+ *   STAT|map_overflow|<n>     — map writes dropped due to capacity
+ *
+ * Usage:
+ *   # Trace all threads:
+ *   sudo bpftrace collector/ebpf/cpu_runtime.bt
+ *
+ *   # Trace a specific TID (set TARGET_TID via -D or env):
+ *   sudo bpftrace -D TARGET_TID=<tid> collector/ebpf/cpu_runtime.bt
+ *
+ * Designed for bpftrace >= 0.20, kernel >= 5.4 (BTF required).
+ * Verified on WSL2 kernel 6.18.54.1-microsoft-standard-WSL2.
+ *
+ * Author: 邓智文 (DAGER)
+ * Project: TraceKV — collector/ebpf/cpu_runtime.bt
+ */
+
+#ifndef TARGET_TGID
+#define TARGET_TGID 0
+#endif
+
+#ifndef TARGET_TID
+#define TARGET_TID 0
+#endif
+
+BEGIN
+{
+    /* E0: emit clock anchor for monotonic→wall conversion in userspace */
+    printf("CLOCK|wall_ns=%llu|mono_ns=%llu\n",
+           (uint64)nsecs(realtime), (uint64)nsecs(monotonic));
+    printf("HEADER|end_ns|tid|cpu|duration_ns|comm\n");
+    @oncpu_matched = 0;
+    @unmatched_out = 0;
+    @exit_cleanup = 0;
+    @map_overflow = 0;
+}
+
+/*
+ * sched_switch
+ *
+ * When a thread is switched IN (next_pid), record the start timestamp.
+ * When a thread is switched OUT (prev_pid), compute the execution duration
+ * and emit an ONCPU event.
+ *
+ * Defensive filtering:
+ * 1. Skip tracer processes to prevent probe-induced latency distortion.
+ * 2. If TARGET_TGID != 0 or TARGET_TID != 0, track only the target tasks.
+ */
+tracepoint:sched:sched_switch
+{
+    /* Cut off tracer self-interference */
+    if (args.next_comm == "bpftrace" || args.next_comm == "python3" || args.next_comm == "python") {
+        return;
+    }
+    if (args.prev_comm == "bpftrace" || args.prev_comm == "python3" || args.prev_comm == "python") {
+        return;
+    }
+
+    /* --- Record switch-in for target thread --- */
+    if ((TARGET_TGID == 0 && TARGET_TID == 0) || args.next_pid == TARGET_TID) {
+        if (args.next_pid != 0) {
+            @on_cpu_start[args.next_pid] = nsecs(monotonic);
+        }
+    }
+
+    /* --- Emit event on switch-out for tracked thread --- */
+    $match_out = (TARGET_TGID == 0 && TARGET_TID == 0) ||
+                 (TARGET_TID != 0 && args.prev_pid == TARGET_TID) ||
+                 (TARGET_TGID != 0 && curtask->tgid == TARGET_TGID);
+
+    if ($match_out) {
+        $in_ts = @on_cpu_start[args.prev_pid];
+        if ($in_ts != 0) {
+            $end_ts = nsecs(monotonic);
+            $dur = $end_ts - $in_ts;
+            printf("ONCPU|%llu|%d|%d|%llu|%s\n",
+                   $end_ts, args.prev_pid, cpu, $dur, args.prev_comm);
+            delete(@on_cpu_start[args.prev_pid]);
+            @oncpu_matched++;
+        } else {
+            if (args.prev_pid != 0) {
+                @unmatched_out++;
+            }
+        }
+    }
+}
+
+/*
+ * sched_process_exit — clean up map entry for exiting task.
+ */
+tracepoint:sched:sched_process_exit
+{
+    if (@on_cpu_start[args.pid] != 0) {
+        delete(@on_cpu_start[args.pid]);
+        @exit_cleanup++;
+    }
+}
+
+END
+{
+    printf("STAT|matched|%llu\n", @oncpu_matched);
+    printf("STAT|unmatched_out|%llu\n", @unmatched_out);
+    printf("STAT|exit_cleanup|%llu\n", @exit_cleanup);
+    printf("STAT|map_overflow|%llu\n", @map_overflow);
+    clear(@on_cpu_start);
+    clear(@oncpu_matched);
+    clear(@unmatched_out);
+    clear(@exit_cleanup);
+    clear(@map_overflow);
+}
