@@ -24,6 +24,10 @@
  * Project: TraceKV — collector/ebpf/sched_latency.bt
  */
 
+#ifndef TARGET_TGID
+#define TARGET_TGID 0
+#endif
+
 BEGIN
 {
     /* E0: emit clock anchor so userspace can convert mono→wall */
@@ -42,13 +46,16 @@ BEGIN
  * sched_wakeup / sched_wakeup_new
  *
  * args->pid is the TID of the TARGET task being woken.
- * We record the monotonic timestamp keyed by that TID.
+ * args->comm is the target task's name.
  *
- * If the TID already has a pending wakeup record we do NOT overwrite,
- * preserving the earliest enqueue time.  We count duplicates instead.
+ * Defensive filtering: exclude tracer itself (bpftrace/python3) from being
+ * tracked to break the recursive self-triggering feedback loop.
  */
 tracepoint:sched:sched_wakeup
 {
+    if (args.comm == "bpftrace" || args.comm == "python3" || args.comm == "python") {
+        return;
+    }
     if (@enqueue_ts[args.pid] == 0) {
         @enqueue_ts[args.pid] = nsecs(monotonic);
     } else {
@@ -58,6 +65,9 @@ tracepoint:sched:sched_wakeup
 
 tracepoint:sched:sched_wakeup_new
 {
+    if (args.comm == "bpftrace" || args.comm == "python3" || args.comm == "python") {
+        return;
+    }
     if (@enqueue_ts[args.pid] == 0) {
         @enqueue_ts[args.pid] = nsecs(monotonic);
     } else {
@@ -69,24 +79,33 @@ tracepoint:sched:sched_wakeup_new
  * sched_switch
  *
  * Handles two latency paths:
+ *   Path A — Wakeup-to-Run (SCHED)
+ *   Path B — Preempt-to-Run (RUNWAIT, E1)
  *
- * Path A — Wakeup-to-Run (SCHED):
- *   next_pid has an enqueue_ts → it was sleeping, just woke up → emit SCHED.
- *
- * Path B — Preempt-to-Run (RUNWAIT, E1):
- *   prev_state == 0 means the outgoing task is still TASK_RUNNING (preempted,
- *   not sleeping).  Record a preempt timestamp.  When that TID next runs,
- *   emit RUNWAIT with the queuing wait duration.
- *
- * On miss for next_pid in both maps: normal unmatched switch (task was
- * already running when tracer started).
+ * Defensive filtering:
+ * 1. Skip tracer processes to prevent probe-induced latency distortion.
+ * 2. If TARGET_TGID != 0 is specified, bypass events for tasks that do not
+ *    belong to the target process tree.
  */
 tracepoint:sched:sched_switch
 {
-    /* --- Path B: record preempt timestamp for outgoing TASK_RUNNING task --- */
-    if (args.prev_state == 0 && args.prev_pid != 0) {
-        if (@preempt_ts[args.prev_pid] == 0) {
-            @preempt_ts[args.prev_pid] = nsecs(monotonic);
+    /* Cut off tracer self-interference */
+    if (args.next_comm == "bpftrace" || args.next_comm == "python3" || args.next_comm == "python") {
+        return;
+    }
+    if (args.prev_comm == "bpftrace" || args.prev_comm == "python3" || args.prev_comm == "python") {
+        return;
+    }
+
+    /* Optional in-kernel early filtering by TGID */
+    if (TARGET_TGID != 0 && curtask->tgid != TARGET_TGID) {
+        /* If outgoing task is not target, don't record preempt for it */
+    } else {
+        /* --- Path B: record preempt timestamp for outgoing TASK_RUNNING task --- */
+        if (args.prev_state == 0 && args.prev_pid != 0) {
+            if (@preempt_ts[args.prev_pid] == 0) {
+                @preempt_ts[args.prev_pid] = nsecs(monotonic);
+            }
         }
     }
 

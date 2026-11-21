@@ -1042,7 +1042,10 @@ def run_collector(
         )
 
     script = str(script_path or _SCRIPT_PATH)
-    cmd = [bt, script]
+    cmd = [bt]
+    if target_pids and len(target_pids) == 1:
+        cmd.extend(["-D", f"TARGET_TGID={target_pids[0]}"])
+    cmd.append(script)
 
     env = os.environ.copy()
     env.setdefault("BPFTRACE_MAX_MAP_KEYS", str(max_map_keys))

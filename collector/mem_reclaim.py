@@ -281,6 +281,7 @@ def run_mem_reclaim_collector(
     duration_s: float = DEFAULT_COLLECTION_DURATION,
     out_path: Path | None = None,
     target_tid: int | None = None,
+    target_tgid: int | None = None,
     bpftrace_path: str | None = None,
 ) -> MemReclaimResult:
     """Launch mem_reclaim.bt and collect direct-reclaim stall events.
@@ -290,6 +291,7 @@ def run_mem_reclaim_collector(
         duration_s:    How many seconds to collect before sending SIGINT.
         out_path:      If set, write JSONL events to this file.
         target_tid:    Mark events from this TID with ``is_target=True``.
+        target_tgid:   Target process TGID for in-kernel early filtering.
         bpftrace_path: Override bpftrace binary path.
 
     Returns:
@@ -308,9 +310,12 @@ def run_mem_reclaim_collector(
         empty.error = f"mem_reclaim.bt not found at {_SCRIPT_PATH}"
         return empty
 
-    cmd = [bt, str(_SCRIPT_PATH)]
+    cmd = [bt]
+    if target_tgid is not None:
+        cmd.extend(["-D", f"TARGET_TGID={target_tgid}"])
     if target_tid is not None:
-        cmd = [bt, "-D", f"TARGET_TID={target_tid}", str(_SCRIPT_PATH)]
+        cmd.extend(["-D", f"TARGET_TID={target_tid}"])
+    cmd.append(str(_SCRIPT_PATH))
 
     out_file = open(out_path, "w", encoding="utf-8") if out_path else None
     result: MemReclaimResult | None = None

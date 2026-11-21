@@ -39,6 +39,10 @@
  * Project: TraceKV — collector/ebpf/mem_reclaim.bt
  */
 
+#ifndef TARGET_TGID
+#define TARGET_TGID 0
+#endif
+
 #ifndef TARGET_TID
 #define TARGET_TID 0
 #endif
@@ -62,7 +66,13 @@ BEGIN
  */
 tracepoint:vmscan:mm_vmscan_direct_reclaim_begin
 {
-    if (TARGET_TID == 0 || tid == TARGET_TID) {
+    /* Cut off tracer self-interference */
+    if (comm == "bpftrace" || comm == "python3" || comm == "python") {
+        return;
+    }
+    if ((TARGET_TGID == 0 && TARGET_TID == 0) ||
+        (TARGET_TID != 0 && tid == TARGET_TID) ||
+        (TARGET_TGID != 0 && curtask->tgid == TARGET_TGID)) {
         @reclaim_start[tid] = nsecs(monotonic);
     }
 }
@@ -75,7 +85,13 @@ tracepoint:vmscan:mm_vmscan_direct_reclaim_begin
  */
 tracepoint:vmscan:mm_vmscan_direct_reclaim_end
 {
-    if (TARGET_TID == 0 || tid == TARGET_TID) {
+    /* Cut off tracer self-interference */
+    if (comm == "bpftrace" || comm == "python3" || comm == "python") {
+        return;
+    }
+    if ((TARGET_TGID == 0 && TARGET_TID == 0) ||
+        (TARGET_TID != 0 && tid == TARGET_TID) ||
+        (TARGET_TGID != 0 && curtask->tgid == TARGET_TGID)) {
         $start = @reclaim_start[tid];
         if ($start != 0) {
             $end_ts = nsecs(monotonic);

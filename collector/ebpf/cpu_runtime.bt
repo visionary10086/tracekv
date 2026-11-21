@@ -31,6 +31,10 @@
  * Project: TraceKV — collector/ebpf/cpu_runtime.bt
  */
 
+#ifndef TARGET_TGID
+#define TARGET_TGID 0
+#endif
+
 #ifndef TARGET_TID
 #define TARGET_TID 0
 #endif
@@ -54,19 +58,33 @@ BEGIN
  * When a thread is switched OUT (prev_pid), compute the execution duration
  * and emit an ONCPU event.
  *
- * If TARGET_TID != 0, only track that specific thread.
+ * Defensive filtering:
+ * 1. Skip tracer processes to prevent probe-induced latency distortion.
+ * 2. If TARGET_TGID != 0 or TARGET_TID != 0, track only the target tasks.
  */
 tracepoint:sched:sched_switch
 {
+    /* Cut off tracer self-interference */
+    if (args.next_comm == "bpftrace" || args.next_comm == "python3" || args.next_comm == "python") {
+        return;
+    }
+    if (args.prev_comm == "bpftrace" || args.prev_comm == "python3" || args.prev_comm == "python") {
+        return;
+    }
+
     /* --- Record switch-in for target thread --- */
-    if (TARGET_TID == 0 || args.next_pid == TARGET_TID) {
+    if ((TARGET_TGID == 0 && TARGET_TID == 0) || args.next_pid == TARGET_TID) {
         if (args.next_pid != 0) {
             @on_cpu_start[args.next_pid] = nsecs(monotonic);
         }
     }
 
     /* --- Emit event on switch-out for tracked thread --- */
-    if (TARGET_TID == 0 || args.prev_pid == TARGET_TID) {
+    $match_out = (TARGET_TGID == 0 && TARGET_TID == 0) ||
+                 (TARGET_TID != 0 && args.prev_pid == TARGET_TID) ||
+                 (TARGET_TGID != 0 && curtask->tgid == TARGET_TGID);
+
+    if ($match_out) {
         $in_ts = @on_cpu_start[args.prev_pid];
         if ($in_ts != 0) {
             $end_ts = nsecs(monotonic);

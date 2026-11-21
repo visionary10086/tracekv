@@ -309,6 +309,7 @@ def run_cpu_runtime_collector(
     out_path: Path | None = None,
     target_tid: int | None = None,
     target_comm: str | None = None,
+    target_tgid: int | None = None,
     bpftrace_path: str | None = None,
 ) -> CpuRuntimeResult:
     """Launch cpu_runtime.bt and collect on-cpu events for *duration_s* seconds.
@@ -319,6 +320,7 @@ def run_cpu_runtime_collector(
         out_path:      If set, write JSONL events to this file.
         target_tid:    Only emit ``is_target=True`` for this TID.
         target_comm:   Only emit ``is_target=True`` for threads with this name.
+        target_tgid:   Target process TGID for in-kernel early filtering.
         bpftrace_path: Override bpftrace binary path.
 
     Returns:
@@ -338,9 +340,12 @@ def run_cpu_runtime_collector(
         empty.error = f"cpu_runtime.bt not found at {_SCRIPT_PATH}"
         return empty
 
-    cmd = [bt, str(_SCRIPT_PATH)]
+    cmd = [bt]
+    if target_tgid is not None:
+        cmd.extend(["-D", f"TARGET_TGID={target_tgid}"])
     if target_tid is not None:
-        cmd = [bt, "-D", f"TARGET_TID={target_tid}", str(_SCRIPT_PATH)]
+        cmd.extend(["-D", f"TARGET_TID={target_tid}"])
+    cmd.append(str(_SCRIPT_PATH))
 
     out_file = open(out_path, "w", encoding="utf-8") if out_path else None
     result: CpuRuntimeResult | None = None
