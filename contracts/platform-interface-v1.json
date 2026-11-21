@@ -1,0 +1,776 @@
+{
+  "interface_version": "1.0",
+  "endpoints": {
+    "strategies": "GET /api/v1/strategies",
+    "recommendation": "POST /api/v1/strategies/evaluate",
+    "ebpf": "POST /api/v1/runs/{run_id}/telemetry/ebpf",
+    "cache": "POST /api/v1/runs/{run_id}/telemetry/cache",
+    "summary": "GET /api/v1/runs/{run_id}/telemetry",
+    "batch": "GET /api/v1/runs/{run_id}/telemetry/{source}/batches/{batch_id}",
+    "reanalyze": "POST /api/v1/runs/{run_id}/analyze"
+  },
+  "guide_url": "/api/v1/interfaces/guide",
+  "example_urls": {
+    "ebpf": "/api/v1/interfaces/examples/ebpf",
+    "cache": "/api/v1/interfaces/examples/cache",
+    "strategy-request": "/api/v1/interfaces/examples/strategy-request",
+    "strategy-response": "/api/v1/interfaces/examples/strategy-response"
+  },
+  "schemas": {
+    "strategy_request": {
+      "$defs": {
+        "StrategyConfig": {
+          "additionalProperties": false,
+          "properties": {
+            "policy": {
+              "default": "gpu_only",
+              "enum": [
+                "gpu_only",
+                "cpu_lru"
+              ],
+              "title": "Policy",
+              "type": "string"
+            },
+            "gpu_kv_blocks": {
+              "default": 64,
+              "maximum": 100000,
+              "minimum": 1,
+              "title": "Gpu Kv Blocks",
+              "type": "integer"
+            },
+            "cpu_kv_blocks": {
+              "default": 0,
+              "maximum": 100000,
+              "minimum": 0,
+              "title": "Cpu Kv Blocks",
+              "type": "integer"
+            }
+          },
+          "title": "StrategyConfig",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "interface_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Interface Version",
+          "type": "string"
+        },
+        "snapshot": {
+          "additionalProperties": true,
+          "title": "Snapshot",
+          "type": "object"
+        },
+        "current_config": {
+          "$ref": "#/$defs/StrategyConfig"
+        },
+        "candidate_cpu_kv_blocks": {
+          "default": 72,
+          "maximum": 100000,
+          "minimum": 1,
+          "title": "Candidate Cpu Kv Blocks",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "snapshot",
+        "current_config"
+      ],
+      "title": "StrategyRequest",
+      "type": "object"
+    },
+    "ebpf_batch": {
+      "$defs": {
+        "ClockAnchor": {
+          "additionalProperties": false,
+          "properties": {
+            "wall_ns": {
+              "exclusiveMinimum": 0,
+              "title": "Wall Ns",
+              "type": "integer"
+            },
+            "monotonic_ns": {
+              "minimum": 0,
+              "title": "Monotonic Ns",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "wall_ns",
+            "monotonic_ns"
+          ],
+          "title": "ClockAnchor",
+          "type": "object"
+        },
+        "EbpfEvent": {
+          "additionalProperties": false,
+          "properties": {
+            "metric": {
+              "enum": [
+                "wakeup_to_run_latency",
+                "runnable_wait",
+                "on_cpu",
+                "blocked",
+                "direct_reclaim",
+                "major_fault",
+                "minor_fault"
+              ],
+              "title": "Metric",
+              "type": "string"
+            },
+            "timestamp_ns": {
+              "minimum": 0,
+              "title": "Timestamp Ns",
+              "type": "integer"
+            },
+            "tid": {
+              "exclusiveMinimum": 0,
+              "title": "Tid",
+              "type": "integer"
+            },
+            "pid": {
+              "anyOf": [
+                {
+                  "exclusiveMinimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Pid"
+            },
+            "comm": {
+              "default": "",
+              "maxLength": 64,
+              "title": "Comm",
+              "type": "string"
+            },
+            "cpu": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Cpu"
+            },
+            "request_id": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Request Id"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Value"
+            },
+            "unit": {
+              "const": "ns",
+              "default": "ns",
+              "title": "Unit",
+              "type": "string"
+            }
+          },
+          "required": [
+            "metric",
+            "timestamp_ns",
+            "tid"
+          ],
+          "title": "EbpfEvent",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "interface_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Interface Version",
+          "type": "string"
+        },
+        "run_id": {
+          "pattern": "^[A-Za-z0-9_-]{1,100}$",
+          "title": "Run Id",
+          "type": "string"
+        },
+        "batch_id": {
+          "pattern": "^[A-Za-z0-9_-]{1,100}$",
+          "title": "Batch Id",
+          "type": "string"
+        },
+        "collector_id": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Collector Id",
+          "type": "string"
+        },
+        "clock": {
+          "$ref": "#/$defs/ClockAnchor"
+        },
+        "window_start_ns": {
+          "minimum": 0,
+          "title": "Window Start Ns",
+          "type": "integer"
+        },
+        "window_end_ns": {
+          "exclusiveMinimum": 0,
+          "title": "Window End Ns",
+          "type": "integer"
+        },
+        "status": {
+          "default": "ok",
+          "enum": [
+            "ok",
+            "failed",
+            "unavailable"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        },
+        "dropped_events": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dropped Events"
+        },
+        "synthetic": {
+          "default": false,
+          "title": "Synthetic",
+          "type": "boolean"
+        },
+        "source": {
+          "const": "ebpf_sched",
+          "default": "ebpf_sched",
+          "title": "Source",
+          "type": "string"
+        },
+        "scope": {
+          "enum": [
+            "system",
+            "target_threads",
+            "comm_match"
+          ],
+          "title": "Scope",
+          "type": "string"
+        },
+        "target_tids": {
+          "default": [],
+          "items": {
+            "exclusiveMinimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 4096,
+          "title": "Target Tids",
+          "type": "array"
+        },
+        "target_comm": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Comm"
+        },
+        "events": {
+          "items": {
+            "$ref": "#/$defs/EbpfEvent"
+          },
+          "maxItems": 2000,
+          "title": "Events",
+          "type": "array"
+        }
+      },
+      "required": [
+        "run_id",
+        "batch_id",
+        "collector_id",
+        "clock",
+        "window_start_ns",
+        "window_end_ns",
+        "scope",
+        "events"
+      ],
+      "title": "EbpfBatch",
+      "type": "object"
+    },
+    "cache_batch": {
+      "$defs": {
+        "CacheEvent": {
+          "additionalProperties": false,
+          "properties": {
+            "metric": {
+              "enum": [
+                "lookup",
+                "hit",
+                "evict",
+                "transfer"
+              ],
+              "title": "Metric",
+              "type": "string"
+            },
+            "timestamp_ns": {
+              "minimum": 0,
+              "title": "Timestamp Ns",
+              "type": "integer"
+            },
+            "worker_id": {
+              "maxLength": 100,
+              "minLength": 1,
+              "title": "Worker Id",
+              "type": "string"
+            },
+            "pid": {
+              "anyOf": [
+                {
+                  "exclusiveMinimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Pid"
+            },
+            "request_id": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Request Id"
+            },
+            "cache_key": {
+              "anyOf": [
+                {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Cache Key"
+            },
+            "tier": {
+              "enum": [
+                "gpu",
+                "cpu"
+              ],
+              "title": "Tier",
+              "type": "string"
+            },
+            "tokens": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Tokens"
+            },
+            "blocks": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Blocks"
+            },
+            "bytes": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Bytes"
+            },
+            "job_id": {
+              "anyOf": [
+                {
+                  "maxLength": 100,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Job Id"
+            },
+            "direction": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "gpu_to_cpu",
+                    "cpu_to_gpu"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Direction"
+            },
+            "status": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "submitted",
+                    "completed",
+                    "failed"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Status"
+            },
+            "elapsed_ns": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Elapsed Ns"
+            }
+          },
+          "required": [
+            "metric",
+            "timestamp_ns",
+            "worker_id",
+            "tier"
+          ],
+          "title": "CacheEvent",
+          "type": "object"
+        },
+        "ClockAnchor": {
+          "additionalProperties": false,
+          "properties": {
+            "wall_ns": {
+              "exclusiveMinimum": 0,
+              "title": "Wall Ns",
+              "type": "integer"
+            },
+            "monotonic_ns": {
+              "minimum": 0,
+              "title": "Monotonic Ns",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "wall_ns",
+            "monotonic_ns"
+          ],
+          "title": "ClockAnchor",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "interface_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Interface Version",
+          "type": "string"
+        },
+        "run_id": {
+          "pattern": "^[A-Za-z0-9_-]{1,100}$",
+          "title": "Run Id",
+          "type": "string"
+        },
+        "batch_id": {
+          "pattern": "^[A-Za-z0-9_-]{1,100}$",
+          "title": "Batch Id",
+          "type": "string"
+        },
+        "collector_id": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Collector Id",
+          "type": "string"
+        },
+        "clock": {
+          "$ref": "#/$defs/ClockAnchor"
+        },
+        "window_start_ns": {
+          "minimum": 0,
+          "title": "Window Start Ns",
+          "type": "integer"
+        },
+        "window_end_ns": {
+          "exclusiveMinimum": 0,
+          "title": "Window End Ns",
+          "type": "integer"
+        },
+        "status": {
+          "default": "ok",
+          "enum": [
+            "ok",
+            "failed",
+            "unavailable"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        },
+        "dropped_events": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dropped Events"
+        },
+        "synthetic": {
+          "default": false,
+          "title": "Synthetic",
+          "type": "boolean"
+        },
+        "source": {
+          "const": "cache",
+          "default": "cache",
+          "title": "Source",
+          "type": "string"
+        },
+        "events": {
+          "items": {
+            "$ref": "#/$defs/CacheEvent"
+          },
+          "maxItems": 2000,
+          "title": "Events",
+          "type": "array"
+        }
+      },
+      "required": [
+        "run_id",
+        "batch_id",
+        "collector_id",
+        "clock",
+        "window_start_ns",
+        "window_end_ns",
+        "events"
+      ],
+      "title": "CacheBatch",
+      "type": "object"
+    },
+    "strategy_advice": {
+      "$defs": {
+        "StrategyConfig": {
+          "additionalProperties": false,
+          "properties": {
+            "policy": {
+              "default": "gpu_only",
+              "enum": [
+                "gpu_only",
+                "cpu_lru"
+              ],
+              "title": "Policy",
+              "type": "string"
+            },
+            "gpu_kv_blocks": {
+              "default": 64,
+              "maximum": 100000,
+              "minimum": 1,
+              "title": "Gpu Kv Blocks",
+              "type": "integer"
+            },
+            "cpu_kv_blocks": {
+              "default": 0,
+              "maximum": 100000,
+              "minimum": 0,
+              "title": "Cpu Kv Blocks",
+              "type": "integer"
+            }
+          },
+          "title": "StrategyConfig",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "interface_version": {
+          "const": "1.0",
+          "title": "Interface Version",
+          "type": "string"
+        },
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "created_at_utc": {
+          "title": "Created At Utc",
+          "type": "string"
+        },
+        "apply_mode": {
+          "const": "next_run",
+          "title": "Apply Mode",
+          "type": "string"
+        },
+        "strategy_id": {
+          "enum": [
+            "gpu_only",
+            "cpu_lru"
+          ],
+          "title": "Strategy Id",
+          "type": "string"
+        },
+        "config_patch": {
+          "$ref": "#/$defs/StrategyConfig"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        },
+        "reason_codes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Reason Codes",
+          "type": "array"
+        },
+        "evidence": {
+          "additionalProperties": true,
+          "title": "Evidence",
+          "type": "object"
+        },
+        "requires_comparison": {
+          "const": true,
+          "title": "Requires Comparison",
+          "type": "boolean"
+        },
+        "causality_established": {
+          "const": false,
+          "title": "Causality Established",
+          "type": "boolean"
+        },
+        "limitations": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Limitations",
+          "type": "array"
+        }
+      },
+      "required": [
+        "interface_version",
+        "run_id",
+        "created_at_utc",
+        "apply_mode",
+        "strategy_id",
+        "config_patch",
+        "reason",
+        "reason_codes",
+        "evidence",
+        "requires_comparison",
+        "causality_established",
+        "limitations"
+      ],
+      "title": "StrategyAdvice",
+      "type": "object"
+    }
+  },
+  "rules": [
+    "一个 batch_id 在同一 run/source 下不可变；同内容重试不重复计数，不同内容返回 409。",
+    "事件时钟为 monotonic ns，UTC = clock.wall_ns + timestamp_ns - clock.monotonic_ns。",
+    "统计按 collector_id、scope、target_tids/comm 分组，范围不同不混合。",
+    "null 表示未知，实测零值保留；synthetic=true 不进入真实观测统计。",
+    "接收数据不代表自动启动内核采集器，历史数据也不代表当前正在采集。"
+  ]
+}

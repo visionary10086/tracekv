@@ -14,7 +14,7 @@ ARTIFACTS = {
     "manifest.json", "requests.jsonl", "request_summary.json", "analysis.json", "warmup.jsonl",
     "report.md", "snapshots.jsonl", "aligned_snapshots.jsonl", "kv_samples.jsonl",
     "gpu_samples.jsonl", "system_samples.jsonl", "kv_transfers.jsonl", "kv_cpu_occupancy.jsonl",
-    "summary.json", "bottleneck_diagnosis.json",
+    "summary.json", "bottleneck_diagnosis.json", "telemetry_summary.json",
     "logs/runner.log", "logs/server-launcher.log", "server/server.log",
 }
 
@@ -85,6 +85,8 @@ class Jobs:
             try:
                 manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
                 if "config" in manifest and "policy" in manifest["config"]:
+                    owned = self.active_id == folder.name and self.process is not None and self.process.poll() is None
+                    manifest["can_stop"] = bool(owned)
                     if manifest.get("status") == "running":
                         owned = self.active_id == folder.name and self.process and self.process.poll() is None
                         if not owned:

@@ -131,7 +131,10 @@ def stop_server(server):
 
 
 def analyze(out):
+    from app.integrations import summarize as summarize_telemetry
     manifest = json.loads((out / "manifest.json").read_text())
+    telemetry = summarize_telemetry(out)
+    write_json(out / "telemetry_summary.json", telemetry)
     records = load_jsonl(out / "requests.jsonl")
     samples = load_jsonl(out / "snapshots.jsonl")
     started = manifest.get("measurement_started_at_utc")
@@ -143,7 +146,7 @@ def analyze(out):
     aligned.write_text("", encoding="utf-8")
     limits = [
         "GPU metrics describe device index 0; system metrics describe the whole host.",
-        "eBPF scheduling events are not connected in this milestone.",
+        "External eBPF/cache batches are summarized separately by collector and scope; they are not injected into sampled gauges.",
         "No automatic causal attribution or strategy performance claim is made.",
         "KV ratios retain actual sampling intervals; they are not averaged into fixed buckets.",
     ]
@@ -177,7 +180,8 @@ def analyze(out):
             append_json(aligned, row)
     analysis = {"run_id": manifest["run_id"], "status": manifest["status"],
                 "summary": summary, "source_status": manifest.get("sources", {}),
-                "limitations": limits, "error": manifest.get("error")}
+                "limitations": limits, "error": manifest.get("error"),
+                "telemetry": telemetry, "telemetry_revision": telemetry["revision"]}
     diagnosis = diagnose_system_bottlenecks(samples)
     diagnosis["run_id"] = manifest["run_id"]
     analysis["diagnosis"] = diagnosis
@@ -187,7 +191,7 @@ def analyze(out):
         "run_id": manifest["run_id"], "status": manifest["status"],
         "config": manifest["config"], "requests": summary,
         "source_status": manifest.get("sources", {}),
-        "diagnosis": diagnosis, "limitations": limits,
+        "diagnosis": diagnosis, "limitations": limits, "telemetry": telemetry,
     })
     lines = ["# TraceKV 实验报告", "", f"- run_id: {manifest['run_id']}",
              f"- 状态: {manifest['status']}", f"- 策略: {manifest['config']['policy']}",
@@ -211,7 +215,12 @@ def analyze(out):
               "- 请求与统计: requests.jsonl、request_summary.json",
               "- 原始采样与窗口结果: snapshots.jsonl、aligned_snapshots.jsonl",
               "- 调查依据: bottleneck_diagnosis.json",
-              "- 统一结果清单: summary.json"]
+              "- 统一结果清单: summary.json",
+              "- 外部缓存与 eBPF 接入统计: telemetry_summary.json", "", "## 外部接入数据", "",
+              "- 缓存事件数: " + str(telemetry["sources"]["cache"]["event_count"]),
+              "- eBPF 事件数: " + str(telemetry["sources"]["ebpf"]["event_count"]),
+              "- 缺失与采集失败、目标范围和丢失统计见 telemetry_summary.json。",
+              "- 外部批次不混入实时快照调查规则，也不构成逐请求因果证明。"]
 
     (out / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return analysis

@@ -17,7 +17,7 @@
 
     /opt/tracekv/venv/bin/python -m tools.serve_platform
 
-打开 http://localhost:8010 ，查看 GPU / CPU / PSI / I/O / KV 实时指标与曲线，启动与停止真实推理实验，
+打开 http://localhost:8010/monitor ，查看 GPU / CPU / PSI / I/O / KV 实时指标与曲线，启动与停止真实推理实验，
 检查逐请求记录、原始采样及报告。页面离线可用，无需 Node 构建。
 本版尚未接入 eBPF 页面和自动对照批次；具体范围见 [平台使用说明](docs/Linux监测平台_使用与验收.md)。
 
@@ -94,3 +94,13 @@ WSL 上的 RTX 4060 实测中，两组各完成 5 次请求，输出一致。CPU
 
 - [vLLM 0.11.2 GPU 安装文档](https://docs.vllm.ai/en/v0.11.2/getting_started/installation/gpu/)
 - [Qwen2.5-0.5B-Instruct 模型卡](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct) 
+
+## 页面与模块接口
+
+- 实时监测：http://localhost:8010/monitor
+- 实验工作台：http://localhost:8010/experiments
+- 运行记录：http://localhost:8010/runs
+- 缓存策略与 eBPF 明确接口：[接口文档](docs/interfaces.md)、[机器可读契约](contracts/platform-interface-v1.json)。
+- 在线交互文档：http://localhost:8010/docs；接口版本 1.0。
+
+三块内容是独立页面。eBPF 接收与报告接口已提供，本机内核采集器仍需独立准备；收到数据不代表当前正在实时采集。
