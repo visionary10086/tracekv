@@ -598,5 +598,91 @@ class TestEbpfBatchBuilder(unittest.TestCase):
             os.unlink(fname)
 
 
+class TestP0Fixes(unittest.TestCase):
+    """Unit tests for P0 fixes: ThreadTracker and streaming batch uploader."""
+
+    def test_thread_tracker_basic_match(self):
+        from collector.cpu_scheduler import ThreadTracker
+        tracker = ThreadTracker(target_pids=[100], auto_expand=False)
+        self.assertTrue(tracker.matches(100))
+        self.assertFalse(tracker.matches(101))
+        # Without /proc verification, synthetic target_pids remain TID filters (tgid is None)
+        self.assertIsNone(tracker.resolve_tgid(100))
+        self.assertIsNone(tracker.resolve_tgid(101))
+
+    def test_thread_tracker_manual_subthread_resolution(self):
+        from collector.cpu_scheduler import ThreadTracker
+        tracker = ThreadTracker(target_pids=[500], auto_expand=False)
+        # Manually register worker thread 501 under main TGID 500
+        tracker._target_tids.add(501)
+        tracker._tid_to_tgid[501] = 500
+
+        self.assertTrue(tracker.matches(501))
+        self.assertEqual(tracker.resolve_tgid(501), 500)
+        self.assertIn(501, tracker.all_target_tids)
+
+    def test_event_to_jsonl_populates_real_tgid(self):
+        from collector.cpu_scheduler import SchedEvent, ThreadTracker, event_to_jsonl
+        tracker = ThreadTracker(target_pids=[1234], auto_expand=False)
+        tracker._target_tids.add(1235)  # worker thread
+        tracker._tid_to_tgid[1235] = 1234  # TGID is 1234
+
+        ev = SchedEvent(switch_ns=1000, wakeup_ns=900, tid=1235, cpu=0, latency_ns=100, comm="vllm_worker")
+        line = event_to_jsonl(ev, run_id="tgid-test", tracker=tracker)
+        rec = json.loads(line)
+        # Real TGID is 1234, while tid is 1235
+        self.assertEqual(rec["pid"], 1234)
+        self.assertEqual(rec["tid"], 1235)
+        self.assertTrue(rec["is_target"])
+
+    def test_iter_jsonl_events_streaming(self):
+        from collector.ebpf_uploader import iter_jsonl_events
+        import tempfile, os
+        records = [
+            {"metric": "on_cpu", "timestamp_ns": 1000, "value": 50, "tid": 10},
+            {"metric": "runnable_wait", "timestamp_ns": 1100, "value": 30, "tid": 11},
+        ]
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            for r in records:
+                f.write(json.dumps(r) + "\n")
+            fname = f.name
+        try:
+            evs = list(iter_jsonl_events(fname))
+            self.assertEqual(len(evs), 2)
+            self.assertEqual(evs[0]["metric"], "on_cpu")
+            self.assertEqual(evs[1]["metric"], "runnable_wait")
+        finally:
+            os.unlink(fname)
+
+    def test_stream_batches_from_jsonl(self):
+        from collector.ebpf_uploader import stream_batches_from_jsonl
+        import tempfile, os
+        clock = {"wall_ns": 1_700_000_000_000_000_000, "monotonic_ns": 1000}
+        # 5 events
+        records = [
+            {"metric": "on_cpu", "timestamp_ns": 1000 + i*10, "value": 50, "tid": 10}
+            for i in range(5)
+        ]
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            for r in records:
+                f.write(json.dumps(r) + "\n")
+            fname = f.name
+        try:
+            batches = list(stream_batches_from_jsonl(
+                fname,
+                run_id="stream-test",
+                collector_id="test-coll",
+                scope="system",
+                clock=clock,
+                window_start_ns=900,
+                window_end_ns=2000,
+            ))
+            self.assertEqual(len(batches), 1)
+            self.assertEqual(len(batches[0]["events"]), 5)
+            self.assertEqual(batches[0]["run_id"], "stream-test")
+        finally:
+            os.unlink(fname)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

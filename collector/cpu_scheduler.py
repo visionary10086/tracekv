@@ -148,6 +148,7 @@ class CollectorResult:
     target_comm: str | None = None
     target_stats: CollectorStats | None = None
     kernel_clock_anchor: ClockAnchor | None = None  # E0: from CLOCK| line
+    target_tids: list[int] | None = None            # Dynamically discovered or observed TIDs
 
 
 # ---------------------------------------------------------------------------
@@ -461,6 +462,128 @@ def compute_stats(latencies_ns: list[int]) -> CollectorStats:
 
 
 # ---------------------------------------------------------------------------
+# Dynamic thread discovery and TGID resolution
+# ---------------------------------------------------------------------------
+
+def discover_process_tids(pid: int) -> set[int]:
+    """Scan /proc/<pid>/task to discover all active thread IDs (TIDs) for a process.
+
+    Returns a set containing at least ``{pid}`` (the main thread).  If /proc
+    is unavailable or permission is denied, falls back gracefully to ``{pid}``.
+    """
+    tids = {pid}
+    task_dir = Path(f"/proc/{pid}/task")
+    if task_dir.is_dir():
+        try:
+            for entry in task_dir.iterdir():
+                if entry.name.isdigit():
+                    tids.add(int(entry.name))
+        except (OSError, PermissionError):
+            pass
+    return tids
+
+
+class ThreadTracker:
+    """Tracks thread IDs (TIDs) for target processes and resolves their owning TGID.
+
+    In Linux, a multi-threaded process (such as a vLLM engine, PyTorch worker pool,
+    or OpenMP runtime) shares a single Process Group ID (TGID = pid), while each
+    thread has a unique Thread ID (TID).  The kernel scheduler tracepoints report
+    individual TIDs.
+
+    This tracker:
+    1. Scans /proc/<pid>/task to automatically expand a target process PID into
+       all of its constituent worker thread TIDs.
+    2. Maps each discovered TID back to its owning process TGID, satisfying the
+       platform contract: 'pid is real TGID, unknown filled as null, cannot be
+       substituted by tid'.
+    3. Supports dynamic TID resolution on cache miss via /proc/<tid>/status.
+    """
+
+    def __init__(
+        self,
+        target_pids: list[int] | set[int] | None = None,
+        target_comm: str | None = None,
+        auto_expand: bool = True,
+    ):
+        self.target_pids: list[int] | None = list(target_pids) if target_pids is not None else None
+        self.target_comm: str | None = target_comm
+        self.auto_expand: bool = auto_expand
+        self._target_tids: set[int] = set(self.target_pids) if self.target_pids else set()
+        self._tid_to_tgid: dict[int, int] = {}
+        if self.target_pids and self.auto_expand:
+            self.refresh()
+
+    def refresh(self) -> None:
+        """Scan /proc/<pid>/task for all target PIDs to update active TIDs and TGID map."""
+        if not self.target_pids:
+            return
+        for pid in self.target_pids:
+            task_dir = Path(f"/proc/{pid}/task")
+            if task_dir.is_dir():
+                try:
+                    for entry in task_dir.iterdir():
+                        if entry.name.isdigit():
+                            tid = int(entry.name)
+                            self._target_tids.add(tid)
+                            self._tid_to_tgid[tid] = pid
+                except (OSError, PermissionError):
+                    pass
+
+    def matches(self, tid: int, comm: str | None = None) -> bool:
+        """Check whether (tid, comm) matches the tracked target process/comm.
+
+        When both target_pids and target_comm are specified, both must match (AND semantics).
+        """
+        if self.target_pids is None and self.target_comm is None:
+            return False
+
+        pid_match = True
+        if self.target_pids is not None:
+            if tid in self._target_tids:
+                pid_match = True
+            elif self.auto_expand:
+                tgid = self.resolve_tgid_from_proc(tid)
+                if tgid is not None and tgid in self.target_pids:
+                    self._target_tids.add(tid)
+                    self._tid_to_tgid[tid] = tgid
+                    pid_match = True
+                else:
+                    pid_match = False
+            else:
+                pid_match = False
+
+        comm_match = True
+        if self.target_comm is not None:
+            comm_match = (comm == self.target_comm)
+
+        return pid_match and comm_match
+
+    def resolve_tgid(self, tid: int) -> int | None:
+        """Return the owning TGID for this TID, or None if unknown."""
+        return self._tid_to_tgid.get(tid)
+
+    @staticmethod
+    def resolve_tgid_from_proc(tid: int) -> int | None:
+        """Inspect /proc/<tid>/status to read the Tgid field."""
+        try:
+            status_path = Path(f"/proc/{tid}/status")
+            if not status_path.exists():
+                return None
+            for line in status_path.read_text(encoding="utf-8").splitlines():
+                if line.startswith("Tgid:"):
+                    return int(line.split(":")[1].strip())
+        except (OSError, ValueError, IndexError):
+            pass
+        return None
+
+    @property
+    def all_target_tids(self) -> list[int]:
+        """Return a sorted list of all known TIDs belonging to the target."""
+        return sorted(self._target_tids)
+
+
+# ---------------------------------------------------------------------------
 # JSONL formatting
 # ---------------------------------------------------------------------------
 
@@ -470,7 +593,9 @@ def _target_scope(target_pids, target_comm):
     return "comm_match" if target_comm is not None else "system"
 
 
-def _matches_target(event, target_pids, target_comm):
+def _matches_target(event, target_pids, target_comm, tracker: ThreadTracker | None = None):
+    if tracker is not None:
+        return tracker.matches(event.tid, event.comm)
     return (target_pids is not None or target_comm is not None) and (
         target_pids is None or event.tid in target_pids
     ) and (target_comm is None or event.comm == target_comm)
@@ -481,13 +606,19 @@ def event_to_jsonl(
     run_id: str,
     target_pids: list[int] | None = None,
     target_comm: str | None = None,
+    tracker: ThreadTracker | None = None,
 ) -> str:
     """Serialize one event to a JSON line (no trailing newline)."""
-    # sched_switch supplies a TID and comm, not the process TGID.
+    # Resolve real TGID if known via tracker
     pid_val = None
-    is_target = _matches_target(event, target_pids, target_comm) if (
-        target_pids is not None or target_comm is not None
-    ) else None
+    if tracker is not None:
+        is_target = tracker.matches(event.tid, event.comm)
+        if is_target:
+            pid_val = tracker.resolve_tgid(event.tid)
+    else:
+        is_target = _matches_target(event, target_pids, target_comm) if (
+            target_pids is not None or target_comm is not None
+        ) else None
 
     payload = {
         "schema_version": 1,
@@ -552,6 +683,8 @@ def stats_to_dict(result: CollectorResult) -> dict:
     }
     if result.target_pids is not None:
         d["target_pids"] = result.target_pids
+    if result.target_tids is not None:
+        d["target_tids"] = result.target_tids
     if result.target_comm is not None:
         d["target_comm"] = result.target_comm
     if result.scope != "system" and result.target_stats is not None:
@@ -613,6 +746,7 @@ def process_stream(
         target_pids=target_pids,
         target_comm=target_comm,
     )
+    tracker = ThreadTracker(target_pids=target_pids, target_comm=target_comm)
     sample_reservoir: list[int] = []
     target_reservoir: list[int] = []
     target_stats = CollectorStats() if scope != "system" else None
@@ -621,7 +755,6 @@ def process_stream(
     rng = random.Random(random_seed) if random_seed is not None else random.Random()
     seen_tids: set[int] = set()
     comm_counts: dict[str, int] = {}
-    target_pids_set = set(target_pids) if target_pids is not None else None
 
     for raw_line in stream:
         line = raw_line.rstrip("\n").rstrip("\r")
@@ -662,22 +795,26 @@ def process_stream(
                 result.stats.parser_error_count += 1
                 continue
             result.stats.runwait_event_count += 1
-            # Write RUNWAIT events to JSONL output with metric tag
+            # Write RUNWAIT events to JSONL output with metric tag and resolved TGID
             if output is not None:
                 rw_wall_ns = (
                     to_wall_ns(rw.switch_ns, result.kernel_clock_anchor)
                     if hasattr(result, "kernel_clock_anchor") and result.kernel_clock_anchor
                     else None
                 )
+                rw_is_target = tracker.matches(rw.tid, rw.comm)
+                rw_tgid = tracker.resolve_tgid(rw.tid) if rw_is_target else None
                 rw_record = {
                     "metric": "runnable_wait",
                     "run_id": run_id,
                     "timestamp_ns": rw.switch_ns,
                     "timestamp_wall_ns": rw_wall_ns,
                     "value": rw.wait_ns,
+                    "pid": rw_tgid,
                     "tid": rw.tid,
                     "cpu": rw.cpu,
                     "comm": rw.comm,
+                    "is_target": rw_is_target,
                 }
                 output.write(json.dumps(rw_record) + "\n")
             continue
@@ -706,8 +843,8 @@ def process_stream(
                 if j < max_samples:
                     sample_reservoir[j] = event.latency_ns
 
-            # Target process filtering
-            is_target = _matches_target(event, target_pids_set, target_comm)
+            # Target process filtering with dynamic thread tree awareness
+            is_target = tracker.matches(event.tid, event.comm)
 
             if is_target and target_stats is not None:
                 target_stats.event_count += 1
@@ -732,6 +869,7 @@ def process_stream(
                         run_id,
                         target_pids=target_pids,
                         target_comm=target_comm,
+                        tracker=tracker,
                     ) + "\n"
                 )
             continue
@@ -770,6 +908,11 @@ def process_stream(
         result.stats.dropped_events_count = max(
             0, result.stats.kernel_matched_count - received_total
         )
+
+    # Reflect all dynamically discovered worker thread TIDs in result.target_tids
+    # while preserving original user configuration in result.target_pids
+    if tracker.target_pids is not None:
+        result.target_tids = tracker.all_target_tids
 
     result.end_anchor = TimeAnchor(
         wall_ns=time.time_ns(), monotonic_ns=time.monotonic_ns(),

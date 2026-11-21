@@ -277,8 +277,56 @@ def push_all_batches(
 
 
 # ---------------------------------------------------------------------------
-# Helper: convert JSONL file → events list
+# Helper: convert JSONL file → events list (Memory-efficient streaming)
 # ---------------------------------------------------------------------------
+
+def iter_jsonl_events(
+    jsonl_path,
+    metric_filter: str | None = None,
+    target_only: bool = False,
+):
+    """Yield eBPF event dicts one-by-one from a JSONL file via streaming.
+
+    Unlike reading the entire file into memory at once, this generator processes
+    lines incrementally, keeping memory usage constant O(1) regardless of file size.
+
+    Args:
+        jsonl_path:    Path to the JSONL file (e.g. from cpu_runtime.py output).
+        metric_filter: If set, only yield events where ``metric == metric_filter``.
+        target_only:   If True, only yield events where ``is_target == True``.
+
+    Yields:
+        Event dicts with at minimum ``metric``, ``timestamp_ns``, ``value``, ``tid``.
+    """
+    from pathlib import Path
+    p = Path(jsonl_path)
+    if not p.exists():
+        return
+
+    with open(p, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if metric_filter and rec.get("metric") != metric_filter:
+                continue
+            if target_only and not rec.get("is_target", False):
+                continue
+            event: dict[str, Any] = {
+                "metric": rec["metric"],
+                "timestamp_ns": rec["timestamp_ns"],
+                "value": rec["value"],
+                "tid": rec.get("tid"),
+            }
+            for opt in ("cpu", "comm", "nr_reclaimed", "is_target"):
+                if opt in rec:
+                    event[opt] = rec[opt]
+            yield event
+
 
 def jsonl_to_events(
     jsonl_path,
@@ -287,39 +335,83 @@ def jsonl_to_events(
 ) -> list[dict[str, Any]]:
     """Read a JSONL file of eBPF events into a list of event dicts.
 
+    Processes the file via streaming to avoid intermediate string list allocations.
+
     Args:
-        jsonl_path:    Path to the JSONL file (e.g. from cpu_runtime.py output).
+        jsonl_path:    Path to the JSONL file.
         metric_filter: If set, only include events where ``metric == metric_filter``.
         target_only:   If True, only include events where ``is_target == True``.
 
     Returns:
-        List of event dicts with at minimum ``metric``, ``timestamp_ns``,
-        ``value``, ``tid``.  Unknown keys are preserved.
+        List of event dicts.
     """
-    from pathlib import Path
-    events = []
-    for line in Path(jsonl_path).read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
+    return list(iter_jsonl_events(jsonl_path, metric_filter=metric_filter, target_only=target_only))
+
+
+def stream_batches_from_jsonl(
+    jsonl_path,
+    run_id: str,
+    collector_id: str,
+    scope: str,
+    clock: dict[str, int],
+    window_start_ns: int,
+    window_end_ns: int,
+    target_tids: list[int] | None = None,
+    target_comm: str | None = None,
+    dropped_events: int | None = None,
+    metric_filter: str | None = None,
+    target_only: bool = False,
+    synthetic: bool = False,
+):
+    """Stream EbpfBatch payloads directly from a JSONL file without loading all events into RAM.
+
+    Reads up to MAX_EVENTS_PER_BATCH events at a time, yields an EbpfBatch dict,
+    and repeats.  Enables processing multi-gigabyte trace files within small,
+    bounded memory.
+
+    Yields:
+        EbpfBatch dicts ready for :func:`push_batch`.
+    """
+    batch_idx = 0
+    current_chunk: list[dict[str, Any]] = []
+
+    for event in iter_jsonl_events(jsonl_path, metric_filter=metric_filter, target_only=target_only):
+        # Bound event timestamp to window if required
+        ts = event.get("timestamp_ns")
+        if ts is not None and (ts < window_start_ns or ts > window_end_ns):
             continue
-        try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if metric_filter and rec.get("metric") != metric_filter:
-            continue
-        if target_only and not rec.get("is_target", False):
-            continue
-        # Remap fields to EbpfBatch event schema
-        event: dict[str, Any] = {
-            "metric": rec["metric"],
-            "timestamp_ns": rec["timestamp_ns"],
-            "value": rec["value"],
-            "tid": rec.get("tid"),
-        }
-        # Preserve optional fields
-        for opt in ("cpu", "comm", "nr_reclaimed", "is_target"):
-            if opt in rec:
-                event[opt] = rec[opt]
-        events.append(event)
-    return events
+        current_chunk.append(event)
+        if len(current_chunk) >= MAX_EVENTS_PER_BATCH:
+            dropped = dropped_events if batch_idx == 0 else None
+            yield build_ebpf_batch(
+                run_id=run_id,
+                collector_id=collector_id,
+                scope=scope,
+                clock=clock,
+                window_start_ns=window_start_ns,
+                window_end_ns=window_end_ns,
+                events=current_chunk,
+                target_tids=target_tids,
+                target_comm=target_comm,
+                dropped_events=dropped,
+                synthetic=synthetic,
+            )
+            batch_idx += 1
+            current_chunk = []
+
+    # Yield remaining events or empty batch if no events
+    if current_chunk or batch_idx == 0:
+        dropped = dropped_events if batch_idx == 0 else None
+        yield build_ebpf_batch(
+            run_id=run_id,
+            collector_id=collector_id,
+            scope=scope,
+            clock=clock,
+            window_start_ns=window_start_ns,
+            window_end_ns=window_end_ns,
+            events=current_chunk,
+            target_tids=target_tids,
+            target_comm=target_comm,
+            dropped_events=dropped,
+            synthetic=synthetic,
+        )

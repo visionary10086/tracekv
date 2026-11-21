@@ -35,6 +35,7 @@ from typing import IO, TextIO
 from collector.cpu_scheduler import (
     ClockAnchor,
     CollectorStats,
+    ThreadTracker,
     TimeAnchor,
     parse_clock,
     parse_stat,
@@ -132,17 +133,26 @@ def oncpu_event_to_jsonl(
     clock_anchor: ClockAnchor | None = None,
     target_tid: int | None = None,
     target_comm: str | None = None,
+    tracker: ThreadTracker | None = None,
 ) -> str:
     """Serialise an :class:`OnCpuEvent` to a JSONL string.
 
     Produces the ``metric: "on_cpu"`` format expected by the platform's
     EbpfBatch interface.  ``timestamp_wall_ns`` is set when a
-    :class:`ClockAnchor` is available; otherwise ``null``.
+    :class:`ClockAnchor` is available; otherwise ``null``.  ``pid`` is populated
+    with the real process TGID if resolved via :class:`ThreadTracker`.
     """
     wall_ns = to_wall_ns(event.end_ns, clock_anchor) if clock_anchor else None
     is_target = False
-    if target_tid is not None and event.tid == target_tid:
+    pid_val = None
+
+    if tracker is not None:
+        is_target = tracker.matches(event.tid, event.comm)
+        if is_target:
+            pid_val = tracker.resolve_tgid(event.tid)
+    elif target_tid is not None and event.tid == target_tid:
         is_target = True
+        pid_val = target_tid
     elif target_comm and event.comm.startswith(target_comm[:15]):  # kernel truncates at 15
         is_target = True
 
@@ -152,6 +162,7 @@ def oncpu_event_to_jsonl(
         "timestamp_ns": event.end_ns,
         "timestamp_wall_ns": wall_ns,
         "value": event.duration_ns,
+        "pid": pid_val,
         "tid": event.tid,
         "cpu": event.cpu,
         "comm": event.comm,
@@ -175,6 +186,7 @@ def process_oncpu_stream(
     """Read lines from *stream*, parse ONCPU events, optionally write JSONL.
 
     Uses reservoir sampling for memory-bounded percentile computation.
+    Supports dynamic worker thread discovery via :class:`ThreadTracker`.
     Returns a :class:`CpuRuntimeResult` with aggregate statistics.
 
     This function does **not** launch bpftrace — it only processes an
@@ -188,6 +200,8 @@ def process_oncpu_stream(
         target_tid=target_tid,
         target_comm=target_comm,
     )
+    target_pids = [target_tid] if target_tid is not None else None
+    tracker = ThreadTracker(target_pids=target_pids, target_comm=target_comm)
     reservoir: list[int] = []
     rng = random.Random(42)
     seen_tids: set[int] = set()
@@ -252,6 +266,7 @@ def process_oncpu_stream(
                         clock_anchor=result.kernel_clock_anchor,
                         target_tid=target_tid,
                         target_comm=target_comm,
+                        tracker=tracker,
                     ) + "\n"
                 )
             continue
