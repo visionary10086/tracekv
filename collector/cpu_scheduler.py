@@ -356,9 +356,13 @@ def check_ebpf_environment(bpftrace_path: str | None = None) -> dict:
 
     # --- tracefs mount check ---
     for tracefs_path in ("/sys/kernel/debug/tracing", "/sys/kernel/tracing"):
-        if Path(tracefs_path).is_dir() and os.access(tracefs_path, os.R_OK):
-            result["tracefs_ok"] = True
-            break
+        try:
+            p = Path(tracefs_path)
+            if p.is_dir() and os.access(tracefs_path, os.R_OK):
+                result["tracefs_ok"] = True
+                break
+        except (OSError, PermissionError):
+            continue
     if not result["tracefs_ok"]:
         result["errors"].append(
             "tracefs not readable at /sys/kernel/debug/tracing or /sys/kernel/tracing"
@@ -475,14 +479,14 @@ def discover_process_tids(pid: int) -> set[int]:
     is unavailable or permission is denied, falls back gracefully to ``{pid}``.
     """
     tids = {pid}
-    task_dir = Path(f"/proc/{pid}/task")
-    if task_dir.is_dir():
-        try:
+    try:
+        task_dir = Path(f"/proc/{pid}/task")
+        if task_dir.is_dir():
             for entry in task_dir.iterdir():
                 if entry.name.isdigit():
                     tids.add(int(entry.name))
-        except (OSError, PermissionError):
-            pass
+    except (OSError, PermissionError):
+        pass
     return tids
 
 
@@ -522,16 +526,16 @@ class ThreadTracker:
         if not self.target_pids:
             return
         for pid in self.target_pids:
-            task_dir = Path(f"/proc/{pid}/task")
-            if task_dir.is_dir():
-                try:
+            try:
+                task_dir = Path(f"/proc/{pid}/task")
+                if task_dir.is_dir():
                     for entry in task_dir.iterdir():
                         if entry.name.isdigit():
                             tid = int(entry.name)
                             self._target_tids.add(tid)
                             self._tid_to_tgid[tid] = pid
-                except (OSError, PermissionError):
-                    pass
+            except (OSError, PermissionError):
+                pass
 
     def matches(self, tid: int, comm: str | None = None) -> bool:
         """Check whether (tid, comm) matches the tracked target process/comm.
