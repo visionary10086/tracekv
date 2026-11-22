@@ -42,6 +42,10 @@ from typing import IO, TextIO
 
 _SCRIPT_PATH = Path(__file__).resolve().parent / "ebpf" / "sched_latency.bt"
 _ENV_CHECK_SCRIPT = Path(__file__).resolve().parent / "ebpf" / "env_check.bt"
+_TELEMETRY_FULL_PATH = Path(__file__).resolve().parent / "ebpf" / "telemetry_full.bt"
+_VM_PAGEFAULT_PATH = Path(__file__).resolve().parent / "ebpf" / "vm_pagefault.bt"
+_SYNC_FUTEX_PATH = Path(__file__).resolve().parent / "ebpf" / "sync_futex.bt"
+_MEM_RECLAIM_PATH = Path(__file__).resolve().parent / "ebpf" / "mem_reclaim.bt"
 
 _EVENT_PREFIX = "SCHED|"
 _RUNWAIT_PREFIX = "RUNWAIT|"
@@ -49,11 +53,15 @@ _ONCPU_PREFIX = "ONCPU|"
 _CLOCK_PREFIX = "CLOCK|"
 _STAT_PREFIX = "STAT|"
 _HEADER_PREFIX = "HEADER|"
+_FAULT_PREFIX = "FAULT|"
+_RECLAIM_PREFIX = "RECLAIM|"
+_COMPACT_PREFIX = "COMPACT|"
+_FUTEX_PREFIX = "FUTEX|"
 
 _MIN_BPFTRACE_VERSION = (0, 20, 0)
 
 DEFAULT_MAX_MAP_KEYS = 65536
-DEFAULT_PERF_RB_PAGES = 256
+DEFAULT_PERF_RB_PAGES = 1024  # Enlarge to 1024 pages (4MB per CPU ring buffer) to prevent log drops under high event loads
 DEFAULT_COLLECTION_DURATION = 10.0
 DEFAULT_MAX_SAMPLES = 100_000
 
@@ -124,6 +132,17 @@ class CollectorStats:
     kernel_runwait_matched: int | None = None  # E1: STAT|runwait_matched from kernel
     oncpu_event_count: int = 0           # E2: on-cpu execution slices parsed
     kernel_oncpu_matched: int | None = None    # E2: STAT|oncpu_matched from kernel
+    # Broad multi-subsystem telemetry expansion
+    page_fault_count: int = 0
+    minor_fault_count: int = 0
+    major_fault_count: int = 0
+    reclaim_event_count: int = 0
+    compaction_event_count: int = 0
+    futex_event_count: int = 0
+    kernel_page_faults: int | None = None
+    kernel_reclaim_matched: int | None = None
+    kernel_compact_matched: int | None = None
+    kernel_futex_matched: int | None = None
     min_ns: int | None = None
     max_ns: int | None = None
     sum_ns: int = 0
@@ -685,6 +704,15 @@ def stats_to_dict(result: CollectorResult) -> dict:
         "kernel_build": result.kernel_build,
         "bpftrace_exit_code": result.bpftrace_exit_code,
         "error": result.error,
+        "runwait_event_count": s.runwait_event_count,
+        "oncpu_event_count": s.oncpu_event_count,
+        "page_fault_count": s.page_fault_count,
+        "minor_fault_count": s.minor_fault_count,
+        "major_fault_count": s.major_fault_count,
+        "reclaim_event_count": s.reclaim_event_count,
+        "compaction_event_count": s.compaction_event_count,
+        "futex_event_count": s.futex_event_count,
+        "map_overflow_count": s.map_overflow_count,
     }
     if result.target_pids is not None:
         d["target_pids"] = result.target_pids
@@ -786,6 +814,23 @@ def process_stream(
                     result.stats.kernel_oncpu_matched = value
                 elif name == "map_overflow":             # E0
                     result.stats.map_overflow_count = value
+                elif name in ("user_faults", "minor_faults"):
+                    result.stats.minor_fault_count = value
+                    result.stats.page_fault_count = result.stats.minor_fault_count + result.stats.major_fault_count
+                elif name in ("kernel_faults", "major_faults"):
+                    result.stats.major_fault_count = value
+                    result.stats.page_fault_count = result.stats.minor_fault_count + result.stats.major_fault_count
+                elif name == "reclaim_matched":
+                    result.stats.kernel_reclaim_matched = value
+                    result.stats.reclaim_event_count = max(result.stats.reclaim_event_count, value)
+                elif name == "compact_matched":
+                    result.stats.kernel_compact_matched = value
+                    result.stats.compaction_event_count = max(result.stats.compaction_event_count, value)
+                elif name == "futex_matched":
+                    result.stats.kernel_futex_matched = value
+                    result.stats.futex_event_count = max(result.stats.futex_event_count, value)
+                elif name in ("dropped", "dropped_events"):
+                    result.stats.dropped_events_count = value
             continue
 
         # E0: kernel clock anchor line
@@ -864,6 +909,148 @@ def process_stream(
                     pass
             result.stats.parser_error_count += 1
             continue
+
+        # E4: Virtual Memory Page Fault event
+        if line.startswith(_FAULT_PREFIX):
+            parts = line.split("|")
+            if len(parts) >= 8:
+                try:
+                    f_ts_ns = int(parts[1])
+                    f_tid = int(parts[2])
+                    f_comm = parts[6].strip()
+                    f_type = parts[7].strip()
+                    result.stats.page_fault_count += 1
+                    if f_type == "major_fault":
+                        result.stats.major_fault_count += 1
+                    else:
+                        result.stats.minor_fault_count += 1
+                    if output is not None:
+                        f_wall_ns = (
+                            to_wall_ns(f_ts_ns, result.kernel_clock_anchor)
+                            if hasattr(result, "kernel_clock_anchor") and result.kernel_clock_anchor
+                            else None
+                        )
+                        f_is_tgt = tracker.matches(f_tid, f_comm)
+                        f_record = {
+                            "metric": f_type,
+                            "run_id": run_id,
+                            "timestamp_ns": f_ts_ns,
+                            "timestamp_wall_ns": f_wall_ns,
+                            "value": 0,
+                            "pid": None,
+                            "tid": f_tid,
+                            "cpu": None,
+                            "comm": f_comm,
+                            "is_target": f_is_tgt,
+                        }
+                        output.write(json.dumps(f_record) + "\n")
+                    continue
+                except (ValueError, IndexError):
+                    result.stats.parser_error_count += 1
+                    continue
+
+        # E5: Direct Reclaim stall event
+        if line.startswith(_RECLAIM_PREFIX):
+            parts = line.split("|")
+            if len(parts) >= 5:
+                try:
+                    r_end_ns = int(parts[1])
+                    r_tid = int(parts[2])
+                    r_dur_ns = int(parts[3])
+                    result.stats.reclaim_event_count += 1
+                    if output is not None:
+                        r_wall_ns = (
+                            to_wall_ns(r_end_ns, result.kernel_clock_anchor)
+                            if hasattr(result, "kernel_clock_anchor") and result.kernel_clock_anchor
+                            else None
+                        )
+                        r_is_tgt = tracker.matches(r_tid, "")
+                        r_record = {
+                            "metric": "direct_reclaim",
+                            "run_id": run_id,
+                            "timestamp_ns": r_end_ns,
+                            "timestamp_wall_ns": r_wall_ns,
+                            "value": r_dur_ns,
+                            "pid": None,
+                            "tid": r_tid,
+                            "cpu": None,
+                            "comm": "",
+                            "is_target": r_is_tgt,
+                        }
+                        output.write(json.dumps(r_record) + "\n")
+                    continue
+                except (ValueError, IndexError):
+                    result.stats.parser_error_count += 1
+                    continue
+
+        # E5: Memory Compaction stall event
+        if line.startswith(_COMPACT_PREFIX):
+            parts = line.split("|")
+            if len(parts) >= 5:
+                try:
+                    c_end_ns = int(parts[1])
+                    c_tid = int(parts[2])
+                    c_dur_ns = int(parts[3])
+                    result.stats.compaction_event_count += 1
+                    if output is not None:
+                        c_wall_ns = (
+                            to_wall_ns(c_end_ns, result.kernel_clock_anchor)
+                            if hasattr(result, "kernel_clock_anchor") and result.kernel_clock_anchor
+                            else None
+                        )
+                        c_is_tgt = tracker.matches(c_tid, "")
+                        c_record = {
+                            "metric": "direct_reclaim",
+                            "run_id": run_id,
+                            "timestamp_ns": c_end_ns,
+                            "timestamp_wall_ns": c_wall_ns,
+                            "value": c_dur_ns,
+                            "pid": None,
+                            "tid": c_tid,
+                            "cpu": None,
+                            "comm": "",
+                            "is_target": c_is_tgt,
+                        }
+                        output.write(json.dumps(c_record) + "\n")
+                    continue
+                except (ValueError, IndexError):
+                    result.stats.parser_error_count += 1
+                    continue
+
+        # E3: Futex synchronization stall event
+        if line.startswith(_FUTEX_PREFIX):
+            parts = line.split("|")
+            if len(parts) >= 6:
+                try:
+                    fu_end_ns = int(parts[1])
+                    fu_tid = int(parts[2])
+                    fu_dur_ns = int(parts[3])
+                    fu_comm = parts[5].strip()
+                    result.stats.futex_event_count += 1
+                    if output is not None:
+                        fu_wall_ns = (
+                            to_wall_ns(fu_end_ns, result.kernel_clock_anchor)
+                            if hasattr(result, "kernel_clock_anchor") and result.kernel_clock_anchor
+                            else None
+                        )
+                        fu_is_tgt = tracker.matches(fu_tid, fu_comm)
+                        fu_record = {
+                            "metric": "blocked",
+                            "run_id": run_id,
+                            "timestamp_ns": fu_end_ns,
+                            "timestamp_wall_ns": fu_wall_ns,
+                            "value": fu_dur_ns,
+                            "pid": None,
+                            "tid": fu_tid,
+                            "cpu": None,
+                            "comm": fu_comm,
+                            "is_target": fu_is_tgt,
+                        }
+                        output.write(json.dumps(fu_record) + "\n")
+                    continue
+                except (ValueError, IndexError):
+                    result.stats.parser_error_count += 1
+                    continue
 
         if line.startswith(_EVENT_PREFIX):
             event = parse_event(line)

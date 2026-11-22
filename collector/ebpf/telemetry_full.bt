@@ -1,0 +1,319 @@
+#!/usr/bin/env bpftrace
+/*
+ * telemetry_full.bt — Unified Multi-Subsystem Kernel Observability Tracer
+ *
+ * Captures comprehensive OS performance telemetry across 5 core subsystems:
+ *   1. CPU Scheduling: Wakeup-to-Run (SCHED) + Preempt-to-Run (RUNWAIT) + On-CPU (ONCPU)
+ *   2. Virtual Memory: User & Kernel Page Fault Exceptions (FAULT: minor_fault / major_fault)
+ *   3. Memory Pressure: Direct Reclaim Stalls (RECLAIM) & Memory Compaction (COMPACT)
+ *   4. Synchronization: Thread Futex Mutex/Barrier Wait Stalls (FUTEX)
+ *
+ * Output formats (pipe-delimited):
+ *   CLOCK|wall_ns=<realtime_ns>|mono_ns=<monotonic_ns>
+ *   HEADER|...
+ *   SCHED|<switch_ns>|<wakeup_ns>|<tid>|<cpu>|<latency_ns>|<comm>
+ *   RUNWAIT|<switch_ns>|<preempt_ns>|<tid>|<cpu>|<wait_ns>|<comm>
+ *   ONCPU|<end_ns>|<tid>|<cpu>|<duration_ns>|<comm>
+ *   FAULT|<ts_ns>|<tid>|<address>|<ip>|<error_code>|<comm>|<minor_fault|major_fault>
+ *   RECLAIM|<end_ns>|<tid>|<duration_ns>|<nr_reclaimed>
+ *   COMPACT|<end_ns>|<tid>|<duration_ns>|<status>
+ *   FUTEX|<end_ns>|<tid>|<duration_ns>|<ret>|<comm>
+ *
+ * Diagnostic counters printed on exit with prefix STAT|.
+ *
+ * Author: 邓智文 (DAGER)
+ * Project: TraceKV — collector/ebpf/telemetry_full.bt
+ */
+
+#ifndef TARGET_TGID
+#define TARGET_TGID 0
+#endif
+
+BEGIN
+{
+    printf("CLOCK|wall_ns=%llu|mono_ns=%llu\n",
+           (uint64)nsecs(realtime), (uint64)nsecs(monotonic));
+    printf("HEADER|type|data\n");
+    @matched = 0;
+    @runwait_matched = 0;
+    @oncpu_matched = 0;
+    @user_faults = 0;
+    @kernel_faults = 0;
+    @reclaim_matched = 0;
+    @compact_matched = 0;
+    @futex_matched = 0;
+    @unmatched_switch = 0;
+    @dup_wakeup = 0;
+    @exit_cleanup = 0;
+    @map_overflow = 0;
+}
+
+/* ---------------- 1. Scheduler Wakeup Probes ---------------- */
+
+tracepoint:sched:sched_wakeup
+{
+    if (args.comm == "bpftrace" || args.comm == "python3" || args.comm == "python") {
+        return;
+    }
+    if (@enqueue_ts[args.pid] == 0) {
+        @enqueue_ts[args.pid] = nsecs(monotonic);
+    } else {
+        @dup_wakeup++;
+    }
+}
+
+tracepoint:sched:sched_wakeup_new
+{
+    if (args.comm == "bpftrace" || args.comm == "python3" || args.comm == "python") {
+        return;
+    }
+    if (@enqueue_ts[args.pid] == 0) {
+        @enqueue_ts[args.pid] = nsecs(monotonic);
+    } else {
+        @dup_wakeup++;
+    }
+}
+
+/* ---------------- 2. Scheduler Switch Probes ---------------- */
+
+tracepoint:sched:sched_switch
+{
+    if (args.next_comm == "bpftrace" || args.next_comm == "python3" || args.next_comm == "python") {
+        return;
+    }
+    if (args.prev_comm == "bpftrace" || args.prev_comm == "python3" || args.prev_comm == "python") {
+        return;
+    }
+
+    $match_outgoing = (TARGET_TGID == 0) || (curtask->tgid == TARGET_TGID);
+    if ($match_outgoing) {
+        /* Preempt-to-run record */
+        if (args.prev_state == 0 && args.prev_pid != 0) {
+            if (@preempt_ts[args.prev_pid] == 0) {
+                @preempt_ts[args.prev_pid] = nsecs(monotonic);
+            }
+        }
+        /* On-CPU slice calculation */
+        $in_ts = @on_cpu_start[args.prev_pid];
+        if ($in_ts != 0) {
+            $end_ts = nsecs(monotonic);
+            $dur = $end_ts - $in_ts;
+            printf("ONCPU|%llu|%d|%d|%llu|%s\n",
+                   $end_ts, args.prev_pid, cpu, $dur, args.prev_comm);
+            delete(@on_cpu_start[args.prev_pid]);
+            @oncpu_matched++;
+        }
+    }
+
+    if (args.next_pid != 0) {
+        @on_cpu_start[args.next_pid] = nsecs(monotonic);
+    }
+
+    /* Wakeup-to-run */
+    $wakeup_ts = @enqueue_ts[args.next_pid];
+    if ($wakeup_ts != 0) {
+        $switch_ts = nsecs(monotonic);
+        $latency = $switch_ts - $wakeup_ts;
+        printf("SCHED|%llu|%llu|%d|%d|%llu|%s\n",
+               $switch_ts, $wakeup_ts, args.next_pid, cpu, $latency, args.next_comm);
+        delete(@enqueue_ts[args.next_pid]);
+        delete(@preempt_ts[args.next_pid]);
+        @matched++;
+    } else {
+        /* Preempt-to-run */
+        $preempt_ts = @preempt_ts[args.next_pid];
+        if ($preempt_ts != 0) {
+            $switch_ts = nsecs(monotonic);
+            $wait = $switch_ts - $preempt_ts;
+            printf("RUNWAIT|%llu|%llu|%d|%d|%llu|%s\n",
+                   $switch_ts, $preempt_ts, args.next_pid, cpu, $wait, args.next_comm);
+            delete(@preempt_ts[args.next_pid]);
+            @runwait_matched++;
+        } else {
+            if (args.next_pid != 0) {
+                @unmatched_switch++;
+            }
+        }
+    }
+}
+
+/* ---------------- 3. Virtual Memory Page Fault Probes ---------------- */
+
+tracepoint:exceptions:page_fault_user
+{
+    if (comm == "bpftrace" || comm == "python3" || comm == "python") {
+        return;
+    }
+    if (TARGET_TGID == 0 || curtask->tgid == TARGET_TGID) {
+        $now = nsecs(monotonic);
+        printf("FAULT|%llu|%d|0x%lx|0x%lx|%lu|%s|minor_fault\n",
+               $now, tid, args.address, args.ip, args.error_code, comm);
+        @user_faults++;
+    }
+}
+
+tracepoint:exceptions:page_fault_kernel
+{
+    if (comm == "bpftrace" || comm == "python3" || comm == "python") {
+        return;
+    }
+    if (TARGET_TGID == 0 || curtask->tgid == TARGET_TGID) {
+        $now = nsecs(monotonic);
+        printf("FAULT|%llu|%d|0x%lx|0x%lx|%lu|%s|major_fault\n",
+               $now, tid, args.address, args.ip, args.error_code, comm);
+        @kernel_faults++;
+    }
+}
+
+/* ---------------- 4. Memory Reclaim & Compaction Probes ---------------- */
+
+tracepoint:vmscan:mm_vmscan_direct_reclaim_begin
+{
+    if (comm == "bpftrace" || comm == "python3" || comm == "python") {
+        return;
+    }
+    if (TARGET_TGID == 0 || curtask->tgid == TARGET_TGID) {
+        @reclaim_start[tid] = nsecs(monotonic);
+    }
+}
+
+tracepoint:vmscan:mm_vmscan_direct_reclaim_end
+{
+    if (comm == "bpftrace" || comm == "python3" || comm == "python") {
+        return;
+    }
+    if (TARGET_TGID == 0 || curtask->tgid == TARGET_TGID) {
+        $start = @reclaim_start[tid];
+        if ($start != 0) {
+            $end_ts = nsecs(monotonic);
+            $dur = $end_ts - $start;
+            printf("RECLAIM|%llu|%d|%llu|%d\n",
+                   $end_ts, tid, $dur, args.nr_reclaimed);
+            delete(@reclaim_start[tid]);
+            @reclaim_matched++;
+        }
+    }
+}
+
+tracepoint:compaction:mm_compaction_begin
+{
+    if (comm == "bpftrace" || comm == "python3" || comm == "python") {
+        return;
+    }
+    if (TARGET_TGID == 0 || curtask->tgid == TARGET_TGID) {
+        @compact_start[tid] = nsecs(monotonic);
+    }
+}
+
+tracepoint:compaction:mm_compaction_end
+{
+    if (comm == "bpftrace" || comm == "python3" || comm == "python") {
+        return;
+    }
+    if (TARGET_TGID == 0 || curtask->tgid == TARGET_TGID) {
+        $start = @compact_start[tid];
+        if ($start != 0) {
+            $end_ts = nsecs(monotonic);
+            $dur = $end_ts - $start;
+            printf("COMPACT|%llu|%d|%llu|%d\n",
+                   $end_ts, tid, $dur, args.status);
+            delete(@compact_start[tid]);
+            @compact_matched++;
+        }
+    }
+}
+
+/* ---------------- 5. Thread Synchronization / Futex Probes ---------------- */
+
+tracepoint:syscalls:sys_enter_futex
+{
+    if (comm == "bpftrace" || comm == "python3" || comm == "python") {
+        return;
+    }
+    if (TARGET_TGID == 0 || curtask->tgid == TARGET_TGID) {
+        @futex_start[tid] = nsecs(monotonic);
+    }
+}
+
+tracepoint:syscalls:sys_exit_futex
+{
+    if (comm == "bpftrace" || comm == "python3" || comm == "python") {
+        return;
+    }
+    if (TARGET_TGID == 0 || curtask->tgid == TARGET_TGID) {
+        $start = @futex_start[tid];
+        if ($start != 0) {
+            $end_ts = nsecs(monotonic);
+            $dur = $end_ts - $start;
+            printf("FUTEX|%llu|%d|%llu|%ld|%s\n",
+                   $end_ts, tid, $dur, args.ret, comm);
+            delete(@futex_start[tid]);
+            @futex_matched++;
+        }
+    }
+}
+
+/* ---------------- Task Exit Cleanup ---------------- */
+
+tracepoint:sched:sched_process_exit
+{
+    if (@enqueue_ts[args.pid] != 0) {
+        delete(@enqueue_ts[args.pid]);
+        @exit_cleanup++;
+    }
+    if (@preempt_ts[args.pid] != 0) {
+        delete(@preempt_ts[args.pid]);
+        @exit_cleanup++;
+    }
+    if (@on_cpu_start[args.pid] != 0) {
+        delete(@on_cpu_start[args.pid]);
+        @exit_cleanup++;
+    }
+    if (@reclaim_start[args.pid] != 0) {
+        delete(@reclaim_start[args.pid]);
+        @exit_cleanup++;
+    }
+    if (@compact_start[args.pid] != 0) {
+        delete(@compact_start[args.pid]);
+        @exit_cleanup++;
+    }
+    if (@futex_start[args.pid] != 0) {
+        delete(@futex_start[args.pid]);
+        @exit_cleanup++;
+    }
+}
+
+END
+{
+    printf("STAT|matched|%llu\n", @matched);
+    printf("STAT|runwait_matched|%llu\n", @runwait_matched);
+    printf("STAT|oncpu_matched|%llu\n", @oncpu_matched);
+    printf("STAT|user_faults|%llu\n", @user_faults);
+    printf("STAT|kernel_faults|%llu\n", @kernel_faults);
+    printf("STAT|reclaim_matched|%llu\n", @reclaim_matched);
+    printf("STAT|compact_matched|%llu\n", @compact_matched);
+    printf("STAT|futex_matched|%llu\n", @futex_matched);
+    printf("STAT|dup_wakeup|%llu\n", @dup_wakeup);
+    printf("STAT|unmatched_switch|%llu\n", @unmatched_switch);
+    printf("STAT|exit_cleanup|%llu\n", @exit_cleanup);
+    printf("STAT|map_overflow|%llu\n", @map_overflow);
+
+    clear(@enqueue_ts);
+    clear(@preempt_ts);
+    clear(@on_cpu_start);
+    clear(@reclaim_start);
+    clear(@compact_start);
+    clear(@futex_start);
+    clear(@matched);
+    clear(@runwait_matched);
+    clear(@oncpu_matched);
+    clear(@user_faults);
+    clear(@kernel_faults);
+    clear(@reclaim_matched);
+    clear(@compact_matched);
+    clear(@futex_matched);
+    clear(@dup_wakeup);
+    clear(@unmatched_switch);
+    clear(@exit_cleanup);
+    clear(@map_overflow);
+}
