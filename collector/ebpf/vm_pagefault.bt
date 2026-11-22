@@ -1,0 +1,89 @@
+#!/usr/bin/env bpftrace
+/*
+ * vm_pagefault.bt — Virtual Memory Page Fault Exception Tracer (E4)
+ *
+ * Measures:
+ *   1. User-space page faults (tracepoint:exceptions:page_fault_user)
+ *   2. Kernel-space page faults (tracepoint:exceptions:page_fault_kernel)
+ *
+ * Distinguishes minor faults (demand paging, heap growth, copy-on-write)
+ * from major faults / kernel page faults that stall inference execution.
+ *
+ * Output format (pipe-delimited):
+ *   CLOCK|wall_ns=<realtime_ns>|mono_ns=<monotonic_ns>
+ *   HEADER|ts_ns|tid|address|ip|error_code|comm|fault_type
+ *   FAULT|<ts_ns>|<tid>|<address>|<ip>|<error_code>|<comm>|<minor_fault|major_fault>
+ *
+ * Diagnostic counters on exit:
+ *   STAT|user_faults|<n>
+ *   STAT|kernel_faults|<n>
+ *   STAT|minor_faults|<n>
+ *   STAT|major_faults|<n>
+ *
+ * Author: 邓智文 (DAGER)
+ * Project: TraceKV — collector/ebpf/vm_pagefault.bt
+ */
+
+#ifndef TARGET_TGID
+#define TARGET_TGID 0
+#endif
+
+#ifndef TARGET_TID
+#define TARGET_TID 0
+#endif
+
+BEGIN
+{
+    printf("CLOCK|wall_ns=%llu|mono_ns=%llu\n",
+           (uint64)nsecs(realtime), (uint64)nsecs(monotonic));
+    printf("HEADER|ts_ns|tid|address|ip|error_code|comm|fault_type\n");
+    @user_faults = 0;
+    @kernel_faults = 0;
+    @minor_faults = 0;
+    @major_faults = 0;
+}
+
+tracepoint:exceptions:page_fault_user
+{
+    if (comm == "bpftrace" || comm == "python3" || comm == "python") {
+        return;
+    }
+    if ((TARGET_TGID == 0 && TARGET_TID == 0) ||
+        (TARGET_TID != 0 && tid == TARGET_TID) ||
+        (TARGET_TGID != 0 && curtask->tgid == TARGET_TGID)) {
+        $now = nsecs(monotonic);
+        /* error_code bit 0 == 0 means not-present (demand paging) */
+        printf("FAULT|%llu|%d|0x%lx|0x%lx|%lu|%s|minor_fault\n",
+               $now, tid, args.address, args.ip, args.error_code, comm);
+        @user_faults++;
+        @minor_faults++;
+    }
+}
+
+tracepoint:exceptions:page_fault_kernel
+{
+    if (comm == "bpftrace" || comm == "python3" || comm == "python") {
+        return;
+    }
+    if ((TARGET_TGID == 0 && TARGET_TID == 0) ||
+        (TARGET_TID != 0 && tid == TARGET_TID) ||
+        (TARGET_TGID != 0 && curtask->tgid == TARGET_TGID)) {
+        $now = nsecs(monotonic);
+        printf("FAULT|%llu|%d|0x%lx|0x%lx|%lu|%s|major_fault\n",
+               $now, tid, args.address, args.ip, args.error_code, comm);
+        @kernel_faults++;
+        @major_faults++;
+    }
+}
+
+END
+{
+    printf("STAT|user_faults|%llu\n", @user_faults);
+    printf("STAT|kernel_faults|%llu\n", @kernel_faults);
+    printf("STAT|minor_faults|%llu\n", @minor_faults);
+    printf("STAT|major_faults|%llu\n", @major_faults);
+    clear(@user_faults);
+    clear(@kernel_faults);
+    clear(@minor_faults);
+    clear(@major_faults);
+}

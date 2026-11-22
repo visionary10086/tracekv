@@ -318,11 +318,15 @@ def generate_aligned_snapshots(
 
     has_anchor = wall_anchor_ns is not None and mono_anchor_ns is not None
 
-    # 2. Ingest scheduler and kernel memory stall events
+    # 2. Ingest scheduler and multi-subsystem kernel stall events
     sched_events: list[tuple[float, float, bool]] = []   # (epoch_sec, latency_us, is_target)
     runwait_events: list[tuple[float, float, bool]] = [] # (epoch_sec, wait_us, is_target)
     oncpu_events: list[tuple[float, float, bool]] = []   # (epoch_sec, dur_us, is_target)
     reclaim_events: list[tuple[float, float, bool]] = [] # (epoch_sec, stall_ms, is_target)
+    compact_events: list[tuple[float, float, bool]] = [] # (epoch_sec, stall_ms, is_target)
+    minor_fault_events: list[tuple[float, float, bool]] = [] # (epoch_sec, 0.0, is_target)
+    major_fault_events: list[tuple[float, float, bool]] = [] # (epoch_sec, 0.0, is_target)
+    futex_events: list[tuple[float, float, bool]] = []   # (epoch_sec, stall_ms, is_target)
     sched_source = "unavailable"
     has_target_events = summary.get("scope") in ("target_process", "target_threads", "comm_match")
     if sched_events_path and Path(sched_events_path).exists():
@@ -342,17 +346,26 @@ def generate_aligned_snapshots(
                         is_tgt = bool(record.get("is_target", False))
                         if "is_target" in record:
                             has_target_events = True
-                        if _finite(mono_ns) and mono_ns >= 0 and _finite(val_ns) and val_ns >= 0:
+                        if _finite(mono_ns) and mono_ns >= 0 and (val_ns is None or (_finite(val_ns) and val_ns >= 0)):
                             wall_ns = wall_anchor_ns + (mono_ns - mono_anchor_ns)
                             epoch_sec = wall_ns / 1e9
+                            lat_or_dur = (val_ns or 0) / 1000.0
                             if metric == "runnable_wait":
-                                runwait_events.append((epoch_sec, val_ns / 1000.0, is_tgt))
+                                runwait_events.append((epoch_sec, lat_or_dur, is_tgt))
                             elif metric == "on_cpu":
-                                oncpu_events.append((epoch_sec, val_ns / 1000.0, is_tgt))
+                                oncpu_events.append((epoch_sec, lat_or_dur, is_tgt))
                             elif metric == "direct_reclaim":
-                                reclaim_events.append((epoch_sec, val_ns / 1e6, is_tgt))
+                                reclaim_events.append((epoch_sec, (val_ns or 0) / 1e6, is_tgt))
+                            elif metric == "compaction":
+                                compact_events.append((epoch_sec, (val_ns or 0) / 1e6, is_tgt))
+                            elif metric == "minor_fault":
+                                minor_fault_events.append((epoch_sec, 0.0, is_tgt))
+                            elif metric == "major_fault":
+                                major_fault_events.append((epoch_sec, 0.0, is_tgt))
+                            elif metric in ("blocked", "futex_wait"):
+                                futex_events.append((epoch_sec, (val_ns or 0) / 1e6, is_tgt))
                             else:
-                                sched_events.append((epoch_sec, val_ns / 1000.0, is_tgt))
+                                sched_events.append((epoch_sec, lat_or_dur, is_tgt))
                     except Exception:
                         continue
             sched_source = "ebpf_sched"
@@ -412,6 +425,14 @@ def generate_aligned_snapshots(
         all_ts.extend([t for t, *_ in oncpu_events])
     if reclaim_events:
         all_ts.extend([t for t, *_ in reclaim_events])
+    if compact_events:
+        all_ts.extend([t for t, *_ in compact_events])
+    if minor_fault_events:
+        all_ts.extend([t for t, *_ in minor_fault_events])
+    if major_fault_events:
+        all_ts.extend([t for t, *_ in major_fault_events])
+    if futex_events:
+        all_ts.extend([t for t, *_ in futex_events])
     if gpu_samples:
         all_ts.extend([t for t, _ in gpu_samples])
     if sys_samples:
@@ -534,8 +555,39 @@ def generate_aligned_snapshots(
         if reclaim_stall_ms is not None:
             system_section["direct_reclaim_stall_ms"] = reclaim_stall_ms
 
+        # Memory Compaction stall (ms)
+        w_compact = [ms for t, ms, _ in compact_events if w_start <= t < w_end]
+        compact_stall_ms = round(sum(w_compact), 2) if w_compact else None
+        if compact_stall_ms is not None:
+            system_section["compaction_stall_ms"] = compact_stall_ms
+
+        # Page fault events in this window
+        w_fault_minor = [t for t, _, is_tgt in minor_fault_events if w_start <= t < w_end and (not has_target_events or is_tgt)]
+        w_fault_major = [t for t, _, is_tgt in major_fault_events if w_start <= t < w_end and (not has_target_events or is_tgt)]
+        minor_fault_count = len(w_fault_minor)
+        major_fault_count = len(w_fault_major)
+        if minor_fault_count > 0 or major_fault_count > 0:
+            system_section["page_faults"] = {"minor": minor_fault_count, "major": major_fault_count}
+
+        # Thread synchronization / Futex blocking stalls (ms)
+        w_futex = [ms for t, ms, is_tgt in futex_events if w_start <= t < w_end and (not has_target_events or is_tgt)]
+        futex_stall_ms = round(sum(w_futex), 2) if w_futex else None
+
         rw_tgt_p99 = _percentile(w_rw_tgt, 99) if w_rw_tgt else (_percentile(w_rw, 99) if w_rw else None)
         oncpu_tgt_p99 = _percentile(w_oncpu_tgt, 99) if w_oncpu_tgt else (_percentile(w_oncpu, 99) if w_oncpu else None)
+
+        # Multi-subsystem structured telemetry sections
+        memory_stalls_section: dict[str, Any] = {
+            "minor_page_faults": minor_fault_count,
+            "major_page_faults": major_fault_count,
+            "direct_reclaim_stall_ms": reclaim_stall_ms or 0.0,
+            "compaction_stall_ms": compact_stall_ms or 0.0,
+        }
+        sync_section: dict[str, Any] = {
+            "blocked_count": len(w_futex),
+            "blocked_stall_ms": futex_stall_ms or 0.0,
+            "blocked_p99_us": _percentile([m * 1000.0 for m in w_futex], 99) if w_futex else None,
+        }
 
         if has_target_events:
             sched_section: dict[str, Any] = {
@@ -586,6 +638,8 @@ def generate_aligned_snapshots(
             "kv": kv_section,
             "sources": sources,
             "sched": sched_section,
+            "memory_stalls": memory_stalls_section,
+            "synchronization": sync_section,
             "kv_intervals": kv_intervals,
         }
 
@@ -760,14 +814,18 @@ def diagnose_system_bottlenecks(snapshots, lagged_corr=None, kv_pcie=None):
     sched = values("sched", "p99_us")
     runwait = values("sched", "runwait_p99_us")
     reclaim = values("system", "direct_reclaim_stall_ms")
+    compact = values("system", "compaction_stall_ms")
+    futex = [s.get("synchronization", {}).get("blocked_stall_ms") for s in snapshots
+             if _finite(s.get("synchronization", {}).get("blocked_stall_ms"))]
     cpu, mem, io = (psi_values("psi_" + name + "_some_avg10") for name in ("cpu", "mem", "io"))
     gpu = values("gpu", "utilization_pct")
-    max_sched, max_rw, max_rec, max_cpu, max_mem, max_io = (
-        max(v, default=None) for v in (sched, runwait, reclaim, cpu, mem, io)
+    max_sched, max_rw, max_rec, max_comp, max_futex, max_cpu, max_mem, max_io = (
+        max(v, default=None) for v in (sched, runwait, reclaim, compact, futex, cpu, mem, io)
     )
     gpu_mean = round(sum(gpu) / len(gpu), 1) if gpu else None
     pcie = (kv_pcie or {}).get("pcie_physical", {}).get("bus_saturation_pct")
     coverage = {"sched": len(sched), "runwait": len(runwait), "direct_reclaim": len(reclaim),
+                "compaction": len(compact), "futex": len(futex),
                 "psi_cpu": len(cpu), "psi_memory": len(mem), "psi_io": len(io), "gpu": len(gpu)}
 
     if high(max_rec, 10.0):
@@ -776,6 +834,18 @@ def diagnose_system_bottlenecks(snapshots, lagged_corr=None, kv_pcie=None):
         message = (f"Linux kernel direct memory reclaim stall detected (peak {max_rec} ms). "
                    "Allocating threads were synchronously blocked on page scanning/compaction.")
         recommendations = ["Inspect memory PSI and swap activity; increase free memory headroom or adjust KV cache allocation thresholds."]
+    elif high(max_comp, 15.0):
+        category = "THP_COMPACTION_STALL"
+        severity = "WARNING"
+        message = (f"Memory compaction stall detected (peak {max_comp} ms) during page allocation. "
+                   "Kernel page migration delayed KV cache allocation.")
+        recommendations = ["Consider configuring vm.compact_unevictable_allowed=0 or adjusting transparent_hugepage=madvise."]
+    elif high(max_futex, 25.0):
+        category = "FUTEX_LOCK_CONTENTION"
+        severity = "WARNING"
+        message = (f"Thread synchronization futex stall detected (peak {max_futex} ms). "
+                   "Worker threads are stalled waiting on mutex or barrier acquisition.")
+        recommendations = ["Inspect worker thread concurrency, PyTorch/NCCL synchronization, and avoid excessive lock contention."]
     elif high(max_rw, 8000) and (max_sched is None or max_rw > max_sched * 1.5):
         category = "CPU_PREEMPTION_CONTENTION"
         severity = "CRITICAL" if high(max_rw, 15000) else "WARNING"

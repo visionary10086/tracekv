@@ -1,0 +1,93 @@
+#!/usr/bin/env bpftrace
+/*
+ * sync_futex.bt — Thread Synchronization & Futex Contention Tracer (E3)
+ *
+ * Measures time spent waiting on user-space fast mutexes (futex syscalls).
+ * In multi-threaded LLM serving and tensor parallel inference (vLLM, PyTorch),
+ * worker threads frequently synchronize across token steps via futex barriers.
+ * Lock contention or preemption while holding a lock causes futex wait stalls.
+ *
+ * Output format (pipe-delimited):
+ *   CLOCK|wall_ns=<realtime_ns>|mono_ns=<monotonic_ns>
+ *   HEADER|end_ns|tid|duration_ns|ret|comm
+ *   FUTEX|<end_ns>|<tid>|<duration_ns>|<ret>|<comm>
+ *
+ * Diagnostic counters on exit:
+ *   STAT|futex_matched|<n>
+ *   STAT|unmatched_exit|<n>
+ *   STAT|exit_cleanup|<n>
+ *
+ * Author: 邓智文 (DAGER)
+ * Project: TraceKV — collector/ebpf/sync_futex.bt
+ */
+
+#ifndef TARGET_TGID
+#define TARGET_TGID 0
+#endif
+
+#ifndef TARGET_TID
+#define TARGET_TID 0
+#endif
+
+BEGIN
+{
+    printf("CLOCK|wall_ns=%llu|mono_ns=%llu\n",
+           (uint64)nsecs(realtime), (uint64)nsecs(monotonic));
+    printf("HEADER|end_ns|tid|duration_ns|ret|comm\n");
+    @futex_matched = 0;
+    @unmatched_exit = 0;
+    @exit_cleanup = 0;
+}
+
+tracepoint:syscalls:sys_enter_futex
+{
+    if (comm == "bpftrace" || comm == "python3" || comm == "python") {
+        return;
+    }
+    if ((TARGET_TGID == 0 && TARGET_TID == 0) ||
+        (TARGET_TID != 0 && tid == TARGET_TID) ||
+        (TARGET_TGID != 0 && curtask->tgid == TARGET_TGID)) {
+        @futex_start[tid] = nsecs(monotonic);
+    }
+}
+
+tracepoint:syscalls:sys_exit_futex
+{
+    if (comm == "bpftrace" || comm == "python3" || comm == "python") {
+        return;
+    }
+    if ((TARGET_TGID == 0 && TARGET_TID == 0) ||
+        (TARGET_TID != 0 && tid == TARGET_TID) ||
+        (TARGET_TGID != 0 && curtask->tgid == TARGET_TGID)) {
+        $start = @futex_start[tid];
+        if ($start != 0) {
+            $end_ts = nsecs(monotonic);
+            $dur = $end_ts - $start;
+            printf("FUTEX|%llu|%d|%llu|%ld|%s\n",
+                   $end_ts, tid, $dur, args.ret, comm);
+            delete(@futex_start[tid]);
+            @futex_matched++;
+        } else {
+            @unmatched_exit++;
+        }
+    }
+}
+
+tracepoint:sched:sched_process_exit
+{
+    if (@futex_start[args.pid] != 0) {
+        delete(@futex_start[args.pid]);
+        @exit_cleanup++;
+    }
+}
+
+END
+{
+    printf("STAT|futex_matched|%llu\n", @futex_matched);
+    printf("STAT|unmatched_exit|%llu\n", @unmatched_exit);
+    printf("STAT|exit_cleanup|%llu\n", @exit_cleanup);
+    clear(@futex_start);
+    clear(@futex_matched);
+    clear(@unmatched_exit);
+    clear(@exit_cleanup);
+}
